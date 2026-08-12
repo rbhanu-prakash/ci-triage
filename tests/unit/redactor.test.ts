@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { Redactor, redactSecrets } from '../../src/security/redactor.js';
 
-describe('Redactor (Secret Sanitization)', () => {
-  it('should redact GitHub Personal Access Tokens (classic and fine-grained)', () => {
+describe('Redactor (Secret Sanitization & Invariants)', () => {
+  it('should redact GitHub Personal Access Tokens and enforce secret invariant', () => {
     const classicToken = 'ghp_' + 'A'.repeat(36);
     const fineGrainedToken =
       'github_pat_11AAAAAAA_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -11,27 +11,60 @@ describe('Redactor (Secret Sanitization)', () => {
     const raw = `Connecting with ${classicToken} and ${fineGrainedToken} and ${oAuthToken}`;
     const sanitized = redactSecrets(raw);
 
+    // Secret Invariant: Secrets MUST NOT appear anywhere in the sanitized result
     expect(sanitized).not.toContain(classicToken);
     expect(sanitized).not.toContain(fineGrainedToken);
     expect(sanitized).not.toContain(oAuthToken);
     expect(sanitized).toBe('Connecting with [REDACTED] and [REDACTED] and [REDACTED]');
   });
 
-  it('should redact Bearer tokens', () => {
-    const raw = 'Authorization: Bearer secret-bearer-token-12345==';
-    const sanitized = redactSecrets(raw);
+  it('should redact Bearer and Basic authorization formats across header, query, and JSON contexts', () => {
+    const bearerSecret1 = 'secret-bearer-token-12345';
+    const bearerSecret2 = 'secret-bearer-token-67890';
+    const bearerSecret3 = 'secret-bearer-token-abcde';
+    const basicSecret1 = 'c2VjcmV0LXBhc3N3b3JkLTEyMw==';
+    const basicSecret2 = 'c2VjcmV0LXBhc3N3b3JkLTQ1Ng==';
+    const basicSecret3 = 'c2VjcmV0LXBhc3N3b3JkLTc4OQ==';
 
-    expect(sanitized).not.toContain('secret-bearer-token-12345==');
-    expect(sanitized).toBe('Authorization: Bearer [REDACTED]');
+    const testCases = [
+      { raw: `Authorization: Bearer ${bearerSecret1}`, secret: bearerSecret1 },
+      { raw: `authorization=Bearer ${bearerSecret2}`, secret: bearerSecret2 },
+      { raw: `"authorization": "Bearer ${bearerSecret3}"`, secret: bearerSecret3 },
+      { raw: `Authorization: Basic ${basicSecret1}`, secret: basicSecret1 },
+      { raw: `authorization=Basic ${basicSecret2}`, secret: basicSecret2 },
+      { raw: `"authorization": "Basic ${basicSecret3}"`, secret: basicSecret3 },
+    ];
+
+    for (const { raw, secret } of testCases) {
+      const sanitized = redactSecrets(raw);
+      expect(sanitized).not.toContain(secret);
+      expect(sanitized).toContain('[REDACTED]');
+    }
   });
 
-  it('should redact AWS Access Key IDs', () => {
-    const awsKey = 'AKIAIOSFODNN7EXAMPLE';
-    const raw = `AWS_ACCESS_KEY_ID=${awsKey} initialized`;
-    const sanitized = redactSecrets(raw);
+  it('should handle AWS Access Key IDs (positive and negative tests) and enforce secret invariant', () => {
+    const validKey1 = 'AKIAIOSFODNN7EXAMPLE';
+    const validKey2 = 'ASIAIOSFODNN7EXAMPLE';
+    const validKey3 = 'AROA1234567890ABCDEF';
 
-    expect(sanitized).not.toContain(awsKey);
-    expect(sanitized).toContain('[REDACTED]');
+    const rawValid = `Keys: ${validKey1}, ${validKey2}, ${validKey3}`;
+    const sanitizedValid = redactSecrets(rawValid);
+
+    expect(sanitizedValid).not.toContain(validKey1);
+    expect(sanitizedValid).not.toContain(validKey2);
+    expect(sanitizedValid).not.toContain(validKey3);
+    expect(sanitizedValid).toBe('Keys: [REDACTED], [REDACTED], [REDACTED]');
+
+    // Negative tests: Invalid structures should not be false-positively redacted
+    const tooShort = 'AKIA123';
+    const tooLong = 'AKIAIOSFODNN7EXAMPLEEXTRA';
+    const notWordBoundary = 'ordinary_word_AKIA';
+    const lowercase = 'akiaiosfodnn7example';
+
+    const rawInvalid = `${tooShort} ${tooLong} ${notWordBoundary} ${lowercase}`;
+    const sanitizedInvalid = redactSecrets(rawInvalid);
+
+    expect(sanitizedInvalid).toBe(rawInvalid);
   });
 
   it('should redact common API keys (OpenAI, Stripe, Slack)', () => {
@@ -48,65 +81,83 @@ describe('Redactor (Secret Sanitization)', () => {
     expect(sanitized).toBe('Keys: [REDACTED], [REDACTED], [REDACTED]');
   });
 
-  it('should redact Private SSH / PGP key blocks', () => {
-    const privateKey = `-----BEGIN RSA PRIVATE KEY-----
-MIIEowIBAAKCAQEA1234567890abc...
------END RSA PRIVATE KEY-----`;
+  it('should redact complete PEM private key blocks and unmatched BEGIN markers safely', () => {
+    const keyData = 'MIIEowIBAAKCAQEA1234567890abc...';
+    const completeKey = `-----BEGIN RSA PRIVATE KEY-----\n${keyData}\n-----END RSA PRIVATE KEY-----`;
+    const truncatedKeyData = 'b3BlbnNzaC1rZXktdjEAAAA...';
+    const unmatchedKey = `-----BEGIN OPENSSH PRIVATE KEY-----\n${truncatedKeyData}`;
 
-    const raw = `Deployment error using key:\n${privateKey}`;
-    const sanitized = redactSecrets(raw);
+    const sanitizedComplete = redactSecrets(`Error:\n${completeKey}`);
+    expect(sanitizedComplete).not.toContain(keyData);
+    expect(sanitizedComplete).toContain('[REDACTED_PRIVATE_KEY]');
 
-    expect(sanitized).not.toContain('MIIEowIBAAKCAQEA1234567890abc');
-    expect(sanitized).toContain('[REDACTED_PRIVATE_KEY]');
+    const sanitizedUnmatched = redactSecrets(`Error:\n${unmatchedKey}`);
+    expect(sanitizedUnmatched).not.toContain(truncatedKeyData);
+    expect(sanitizedUnmatched).toContain('[REDACTED_PRIVATE_KEY]');
   });
 
-  it('should redact password, token, secret, and api_key assignments', () => {
-    const raw =
-      'password=superSecret123 token: "myToken456" secret: \'mySecret789\' api_key=key999';
-    const sanitized = redactSecrets(raw);
+  it('should redact all token assignment quoting variants and enforce secret invariant', () => {
+    const s1 = 'SECRET_ASSIGN_1';
+    const s2 = 'SECRET_ASSIGN_2';
+    const s3 = 'SECRET_ASSIGN_3';
+    const s4 = 'SECRET_ASSIGN_4';
+    const s5 = 'SECRET_ASSIGN_5';
+    const s6 = 'SECRET_ASSIGN_6';
 
-    expect(sanitized).not.toContain('superSecret123');
-    expect(sanitized).not.toContain('myToken456');
-    expect(sanitized).not.toContain('mySecret789');
-    expect(sanitized).not.toContain('key999');
-    expect(sanitized).toBe(
-      'password=[REDACTED] token: "[REDACTED]" secret: \'[REDACTED]\' api_key=[REDACTED]',
-    );
+    const assignments = [
+      { raw: `token=${s1}`, secret: s1 },
+      { raw: `token="${s2}"`, secret: s2 },
+      { raw: `token='${s3}'`, secret: s3 },
+      { raw: `"token": "${s4}"`, secret: s4 },
+      { raw: `TOKEN=${s5}`, secret: s5 },
+      { raw: `export TOKEN=${s6}`, secret: s6 },
+    ];
+
+    for (const { raw, secret } of assignments) {
+      const sanitized = redactSecrets(raw);
+      expect(sanitized).not.toContain(secret);
+      expect(sanitized).toContain('[REDACTED]');
+    }
   });
 
   it('should redact secrets embedded in URLs', () => {
-    const rawUrl1 = 'https://admin:myPass123@github.com/my-org/repo.git';
-    const rawUrl2 = 'https://api.service.com/data?api_key=secretKey123&format=json';
+    const pass = 'myPass123';
+    const apiKey = 'secretKey123';
+    const rawUrl1 = `https://admin:${pass}@github.com/my-org/repo.git`;
+    const rawUrl2 = `https://api.service.com/data?api_key=${apiKey}&format=json`;
 
     const sanitized1 = redactSecrets(rawUrl1);
     const sanitized2 = redactSecrets(rawUrl2);
 
-    expect(sanitized1).not.toContain('myPass123');
+    expect(sanitized1).not.toContain(pass);
     expect(sanitized1).toBe('https://admin:[REDACTED]@github.com/my-org/repo.git');
 
-    expect(sanitized2).not.toContain('secretKey123');
+    expect(sanitized2).not.toContain(apiKey);
     expect(sanitized2).toBe('https://api.service.com/data?api_key=[REDACTED]&format=json');
   });
 
   it('should support user-provided custom secret patterns', () => {
+    const secret = 'CUSTOM_SECRET_987654';
     const customPattern = 'CUSTOM_SECRET_\\d+';
     const redactor = new Redactor([customPattern]);
 
-    const raw = 'Found credential CUSTOM_SECRET_987654 in configuration';
+    const raw = `Found credential ${secret} in configuration`;
     const sanitized = redactor.redact(raw);
 
-    expect(sanitized).not.toContain('CUSTOM_SECRET_987654');
+    expect(sanitized).not.toContain(secret);
     expect(sanitized).toBe('Found credential [REDACTED] in configuration');
   });
 
   it('should handle multiple different secrets in a single log line', () => {
+    const pass = 'p12345';
+    const awsKey = 'AKIAIOSFODNN7EXAMPLE';
     const classicToken = 'ghp_' + 'C'.repeat(36);
-    const raw = `password=p12345 AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE token=${classicToken}`;
+    const raw = `password=${pass} AWS_ACCESS_KEY_ID=${awsKey} token=${classicToken}`;
 
     const sanitized = redactSecrets(raw);
 
-    expect(sanitized).not.toContain('p12345');
-    expect(sanitized).not.toContain('AKIAIOSFODNN7EXAMPLE');
+    expect(sanitized).not.toContain(pass);
+    expect(sanitized).not.toContain(awsKey);
     expect(sanitized).not.toContain(classicToken);
   });
 
