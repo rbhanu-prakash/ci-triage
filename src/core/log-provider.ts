@@ -27,7 +27,7 @@ export class StringLogStreamProvider implements LogStreamProvider {
     }
   }
 
-  async getEstimatedSizeBytes(): Promise<number> {
+  async getEstimatedSizeBytes(): Promise<number | undefined> {
     return Buffer.byteLength(this.content, 'utf-8');
   }
 }
@@ -60,15 +60,8 @@ export class IncrementalArrayLogStreamProvider implements LogStreamProvider {
     }
   }
 
-  async getEstimatedSizeBytes(): Promise<number> {
-    if (this.estimatedSizeBytes !== undefined) {
-      return this.estimatedSizeBytes;
-    }
-    let bytes = 0;
-    for await (const line of this.getLineStream()) {
-      bytes += Buffer.byteLength(line, 'utf-8') + 1;
-    }
-    return bytes;
+  async getEstimatedSizeBytes(): Promise<number | undefined> {
+    return this.estimatedSizeBytes;
   }
 }
 

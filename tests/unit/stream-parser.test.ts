@@ -178,4 +178,34 @@ describe('Bounded-Memory Log Stream Parser', () => {
     expect(result.frames.length).toBe(1);
     expect(result.frames[0].rawErrorLine).toBe('Error: Build failed with exit code 1');
   });
+
+  it('should allow calling getEstimatedSizeBytes before parse without exhausting a one-shot AsyncGenerator stream', async () => {
+    let generatorCalled = false;
+
+    // One-shot AsyncGenerator function
+    async function* oneShotStream(): AsyncGenerator<string> {
+      if (generatorCalled) {
+        throw new Error('One-shot generator function was invoked multiple times');
+      }
+      generatorCalled = true;
+
+      yield '2026-08-12T10:00:00Z [INFO] Line 1';
+      yield '2026-08-12T10:00:01Z Error: Failure in step 2';
+      yield '2026-08-12T10:00:02Z [INFO] Line 3';
+    }
+
+    const provider = new IncrementalArrayLogStreamProvider(oneShotStream);
+
+    // Call getEstimatedSizeBytes first
+    const sizeEstimate = await provider.getEstimatedSizeBytes();
+    expect(sizeEstimate).toBeUndefined(); // Should return undefined without calling/consuming the generator
+
+    // Next parse the log stream
+    const parser = new StreamLogParser();
+    const result = await parser.parse(provider);
+
+    expect(result.totalLinesProcessed).toBe(3);
+    expect(result.totalErrorsDetected).toBe(1);
+    expect(result.frames[0].rawErrorLine).toContain('Error: Failure in step 2');
+  });
 });

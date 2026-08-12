@@ -35,8 +35,8 @@ export interface AnalysisConfig {
 export interface LogStreamProvider {
   /** Stream log line chunks iteratively without buffering entire log into memory */
   getLineStream(): AsyncIterable<string>;
-  /** Total estimated size of the log stream in bytes */
-  getEstimatedSizeBytes(): Promise<number>;
+  /** Total estimated size of the log stream in bytes (returns undefined if unavailable without consuming the stream) */
+  getEstimatedSizeBytes(): Promise<number | undefined>;
 }
 
 export interface FailureFingerprint {
