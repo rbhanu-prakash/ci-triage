@@ -43,9 +43,9 @@ describe('Redactor (Secret Sanitization & Invariants)', () => {
   });
 
   it('should handle AWS Access Key IDs (positive and negative tests) and enforce secret invariant', () => {
-    const validKey1 = 'AKIAIOSFODNN7EXAMPLE';
-    const validKey2 = 'ASIAIOSFODNN7EXAMPLE';
-    const validKey3 = 'AROA1234567890ABCDEF';
+    const validKey1 = 'AKIA' + 'A'.repeat(16);
+    const validKey2 = 'ASIA' + 'B'.repeat(16);
+    const validKey3 = 'AROA' + 'C'.repeat(16);
 
     const rawValid = `Keys: ${validKey1}, ${validKey2}, ${validKey3}`;
     const sanitizedValid = redactSecrets(rawValid);
@@ -57,9 +57,9 @@ describe('Redactor (Secret Sanitization & Invariants)', () => {
 
     // Negative tests: Invalid structures should not be false-positively redacted
     const tooShort = 'AKIA123';
-    const tooLong = 'AKIAIOSFODNN7EXAMPLEEXTRA';
+    const tooLong = 'AKIA' + 'A'.repeat(16) + 'EXTRA';
     const notWordBoundary = 'ordinary_word_AKIA';
-    const lowercase = 'akiaiosfodnn7example';
+    const lowercase = 'akia' + 'a'.repeat(16);
 
     const rawInvalid = `${tooShort} ${tooLong} ${notWordBoundary} ${lowercase}`;
     const sanitizedInvalid = redactSecrets(rawInvalid);
@@ -171,7 +171,7 @@ describe('Redactor (Secret Sanitization & Invariants)', () => {
 
   it('should handle multiple different secrets in a single log line', () => {
     const pass = 'p12345';
-    const awsKey = 'AKIAIOSFODNN7EXAMPLE';
+    const awsKey = 'AKIA' + 'D'.repeat(16);
     const classicToken = 'ghp_' + 'C'.repeat(36);
     const raw = `password=${pass} AWS_ACCESS_KEY_ID=${awsKey} token=${classicToken}`;
 

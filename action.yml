@@ -45,5 +45,5 @@ outputs:
     description: 'Concise Markdown format triage report with observed evidence and recommendations.'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/index.js'
