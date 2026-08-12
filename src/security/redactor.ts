@@ -42,9 +42,9 @@ export class Redactor {
       /-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )?PRIVATE KEY-----/gi,
       '[REDACTED_PRIVATE_KEY]',
     );
-    // Unmatched BEGIN marker fallback: fail safely by redacting a bounded safety region (up to 2048 chars)
+    // Unmatched BEGIN marker fallback: redact from the BEGIN marker through the end of supplied input
     sanitized = sanitized.replace(
-      /-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----[\s\S]{0,2048}/gi,
+      /-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----[\s\S]*/gi,
       '[REDACTED_PRIVATE_KEY]',
     );
 

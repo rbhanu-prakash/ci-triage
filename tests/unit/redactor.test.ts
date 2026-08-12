@@ -81,19 +81,40 @@ describe('Redactor (Secret Sanitization & Invariants)', () => {
     expect(sanitized).toBe('Keys: [REDACTED], [REDACTED], [REDACTED]');
   });
 
-  it('should redact complete PEM private key blocks and unmatched BEGIN markers safely', () => {
+  it('should redact complete PEM private key blocks', () => {
     const keyData = 'MIIEowIBAAKCAQEA1234567890abc...';
-    const completeKey = `-----BEGIN RSA PRIVATE KEY-----\n${keyData}\n-----END RSA PRIVATE KEY-----`;
-    const truncatedKeyData = 'b3BlbnNzaC1rZXktdjEAAAA...';
-    const unmatchedKey = `-----BEGIN OPENSSH PRIVATE KEY-----\n${truncatedKeyData}`;
+    const completeKey = `-----BEGIN RSA PRIVATE KEY-----\n${keyData}\n-----END RSA PRIVATE KEY-----\nsome log output afterwards`;
 
     const sanitizedComplete = redactSecrets(`Error:\n${completeKey}`);
     expect(sanitizedComplete).not.toContain(keyData);
     expect(sanitizedComplete).toContain('[REDACTED_PRIVATE_KEY]');
+    expect(sanitizedComplete).toContain('some log output afterwards');
+  });
 
-    const sanitizedUnmatched = redactSecrets(`Error:\n${unmatchedKey}`);
-    expect(sanitizedUnmatched).not.toContain(truncatedKeyData);
-    expect(sanitizedUnmatched).toContain('[REDACTED_PRIVATE_KEY]');
+  it('should redact unmatched BEGIN markers through the end of input (<2048 chars) and leave no key material', () => {
+    const keyMaterial = 'X'.repeat(500);
+    const logPrefix = 'Log header line\n';
+    const raw = `${logPrefix}-----BEGIN OPENSSH PRIVATE KEY-----\n${keyMaterial}`;
+
+    const sanitized = redactSecrets(raw);
+
+    expect(sanitized).toContain('Log header line');
+    expect(sanitized).not.toContain(keyMaterial);
+    expect(sanitized).not.toContain('XXXXX');
+    expect(sanitized).toBe(`${logPrefix}[REDACTED_PRIVATE_KEY]`);
+  });
+
+  it('should redact unmatched BEGIN markers through the end of input (>2048 chars) and leave no key material', () => {
+    const keyMaterial = 'Y'.repeat(3000);
+    const logPrefix = 'Log header line\n';
+    const raw = `${logPrefix}-----BEGIN PRIVATE KEY-----\n${keyMaterial}`;
+
+    const sanitized = redactSecrets(raw);
+
+    expect(sanitized).toContain('Log header line');
+    expect(sanitized).not.toContain(keyMaterial);
+    expect(sanitized).not.toContain('YYYYY');
+    expect(sanitized).toBe(`${logPrefix}[REDACTED_PRIVATE_KEY]`);
   });
 
   it('should redact all token assignment quoting variants and enforce secret invariant', () => {
