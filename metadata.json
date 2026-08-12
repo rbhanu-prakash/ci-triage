@@ -1,0 +1,6 @@
+{
+  "name": "CI Triage",
+  "description": "Evidence-backed GitHub Actions failure triage tool",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

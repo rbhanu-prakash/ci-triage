@@ -1,0 +1,49 @@
+name: 'CI Triage'
+description: 'Evidence-backed GitHub Actions failure triage tool. Diagnoses workflow failures without digging through thousands of log lines.'
+author: 'CI Triage Contributors'
+branding:
+  icon: 'alert-triangle'
+  color: 'red'
+
+inputs:
+  github-token:
+    description: 'GitHub token with read access to workflow runs and logs (and write access to pull-requests if comment-on-pr is true).'
+    required: true
+    default: '${{ github.token }}'
+
+  history-depth:
+    description: 'Number of historical workflow runs to inspect for cross-run failure fingerprint comparisons.'
+    required: false
+    default: '10'
+
+  comment-on-pr:
+    description: 'Explicitly enable posting a Markdown triage comment to the associated Pull Request (requires pull-requests: write permission).'
+    required: false
+    default: 'false'
+
+  unknown-threshold:
+    description: 'Minimum confidence score percentage required. If maximum score is below this boundary, classification defaults to UNKNOWN.'
+    required: false
+    default: '50'
+
+  min-flaky-confidence:
+    description: 'Minimum composite confidence score percentage required for FLAKY_TEST classification.'
+    required: false
+    default: '75'
+
+  min-regression-confidence:
+    description: 'Minimum composite confidence score percentage required for CODE_REGRESSION classification.'
+    required: false
+    default: '80'
+
+outputs:
+  classification:
+    description: 'The classified failure category (e.g., TEST_FAILURE, FLAKY_TEST, DEPENDENCY, UNKNOWN).'
+  confidence:
+    description: 'Confidence percentage (0-100) associated with the classification.'
+  summary:
+    description: 'Concise Markdown format triage report with observed evidence and recommendations.'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

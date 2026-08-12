@@ -1,0 +1,31 @@
+{
+  "name": "ci-triage",
+  "version": "0.1.0",
+  "description": "Evidence-backed GitHub Actions failure triage tool",
+  "main": "dist/index.js",
+  "module": "src/index.ts",
+  "types": "src/index.ts",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "ncc build src/action-entry.ts -o dist --source-map --license licenses.txt",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\""
+  },
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@actions/github": "^6.0.0"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.26.0",
+    "@typescript-eslint/parser": "^8.26.0",
+    "@vercel/ncc": "^0.38.3",
+    "eslint": "^9.22.0",
+    "prettier": "^3.5.3",
+    "typescript": "~5.8.2",
+    "vitest": "^3.0.7"
+  }
+}
