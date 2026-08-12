@@ -16,12 +16,15 @@ export interface ContextWindowConfig {
   linesAfter: number;
   /** Maximum number of distinct frames to store in memory (default: 50) */
   maxFrames: number;
+  /** Maximum line length in characters retained in context frames (default: 8192) */
+  maxLineLength: number;
 }
 
 export const DEFAULT_CONTEXT_CONFIG: ContextWindowConfig = {
   linesBefore: 20,
   linesAfter: 40,
   maxFrames: 50,
+  maxLineLength: 8192,
 };
 
 export interface ContextFrame {
@@ -54,6 +57,10 @@ export class ContextWindowManager {
    * Process a single sanitized log line in sequence.
    */
   public processLine(line: string, lineIndex: number, isError: boolean): void {
+    if (line.length > this.config.maxLineLength) {
+      line = line.slice(0, this.config.maxLineLength) + '... [truncated]';
+    }
+
     // 1. If currently collecting linesAfter for active pending frames, append this line
     for (const frame of this.pendingFrames) {
       if (lineIndex > frame.errorLineIndex && lineIndex <= frame.endLineIndex) {

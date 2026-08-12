@@ -1,5 +1,18 @@
 import { LogStreamProvider } from './types.js';
 
+/**
+ * StringLogStreamProvider is an in-memory test/local convenience implementation.
+ *
+ * ARCHITECTURAL NOTICE:
+ * This provider buffers the entire log content in memory as a string and splits it
+ * into an array of lines. Therefore, it is NOT bounded-memory for arbitrary large logs.
+ * It is designed strictly for unit tests, small local strings, and deterministic fixtures.
+ *
+ * Production integrations (such as the GitHub Actions log streaming adapter) MUST
+ * supply a true streaming LogStreamProvider (e.g. wrapping a Node.js ReadableStream or
+ * chunked HTTP reader) that yields log lines incrementally without loading the entire log
+ * into memory at once.
+ */
 export class StringLogStreamProvider implements LogStreamProvider {
   private content: string;
 
@@ -21,4 +34,47 @@ export class StringLogStreamProvider implements LogStreamProvider {
 
 export function createStringLogProvider(content: string): LogStreamProvider {
   return new StringLogStreamProvider(content);
+}
+
+/**
+ * IncrementalArrayLogStreamProvider is a lightweight test and fixture provider
+ * that yields lines incrementally from an iterable or generator without joining or
+ * splitting a monolithic string in memory.
+ */
+export class IncrementalArrayLogStreamProvider implements LogStreamProvider {
+  private linesSource: Iterable<string> | AsyncIterable<string> | (() => AsyncGenerator<string>);
+  private estimatedSizeBytes?: number;
+
+  constructor(
+    linesSource: Iterable<string> | AsyncIterable<string> | (() => AsyncGenerator<string>),
+    estimatedSizeBytes?: number,
+  ) {
+    this.linesSource = linesSource;
+    this.estimatedSizeBytes = estimatedSizeBytes;
+  }
+
+  async *getLineStream(): AsyncIterable<string> {
+    const source = typeof this.linesSource === 'function' ? this.linesSource() : this.linesSource;
+    for await (const line of source) {
+      yield line;
+    }
+  }
+
+  async getEstimatedSizeBytes(): Promise<number> {
+    if (this.estimatedSizeBytes !== undefined) {
+      return this.estimatedSizeBytes;
+    }
+    let bytes = 0;
+    for await (const line of this.getLineStream()) {
+      bytes += Buffer.byteLength(line, 'utf-8') + 1;
+    }
+    return bytes;
+  }
+}
+
+export function createIncrementalLogProvider(
+  lines: Iterable<string> | AsyncIterable<string> | (() => AsyncGenerator<string>),
+  estimatedSizeBytes?: number,
+): LogStreamProvider {
+  return new IncrementalArrayLogStreamProvider(lines, estimatedSizeBytes);
 }

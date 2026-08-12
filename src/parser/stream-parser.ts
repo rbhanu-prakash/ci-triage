@@ -10,11 +10,18 @@ import { LogStreamProvider, AnalysisConfig } from '../core/types.js';
 import { redactSecrets } from '../security/redactor.js';
 import { stripAnsi } from './fingerprint.js';
 import { isErrorSignature } from './error-patterns.js';
-import { ContextWindowManager, ContextFrame, ContextWindowConfig } from './context-window.js';
+import {
+  ContextWindowManager,
+  ContextFrame,
+  ContextWindowConfig,
+  DEFAULT_CONTEXT_CONFIG,
+} from './context-window.js';
 
 export interface StreamParserOptions {
   /** Maximum log size in bytes to process before truncating (default: 10MB) */
   maxLogSizeBytes?: number;
+  /** Maximum single line character length retained in context frames (default: 8192) */
+  maxLineLength?: number;
   /** Custom user secret patterns to sanitize */
   customSecretPatterns?: string[];
   /** Custom error signature patterns */
@@ -46,14 +53,24 @@ export class StreamLogParser {
     const customPatterns = this.options.customSecretPatterns ?? [];
     const customSignatures = this.options.customErrorSignatures;
 
-    const contextManager = new ContextWindowManager(this.options.contextConfig, customPatterns);
+    const maxLineLength =
+      this.options.maxLineLength ??
+      this.options.contextConfig?.maxLineLength ??
+      DEFAULT_CONTEXT_CONFIG.maxLineLength;
+
+    const contextConfig: Partial<ContextWindowConfig> = {
+      maxLineLength,
+      ...this.options.contextConfig,
+    };
+
+    const contextManager = new ContextWindowManager(contextConfig, customPatterns);
 
     let bytesProcessed = 0;
     let lineIndex = 0;
     let truncated = false;
 
     for await (const rawLine of logProvider.getLineStream()) {
-      // Calculate byte length of line (+1 for newline character)
+      // Calculate byte length of line (+1 for newline character) to preserve maxLogSizeBytes semantics
       const lineBytes = Buffer.byteLength(rawLine, 'utf-8') + 1;
 
       if (bytesProcessed + lineBytes > maxBytes) {
@@ -63,8 +80,14 @@ export class StreamLogParser {
 
       bytesProcessed += lineBytes;
 
+      // Bound processing for exceptionally large individual lines
+      const lineToProcess =
+        rawLine.length > maxLineLength
+          ? rawLine.slice(0, maxLineLength) + '... [truncated]'
+          : rawLine;
+
       // 1. Strip ANSI escape codes
-      const cleanLine = stripAnsi(rawLine);
+      const cleanLine = stripAnsi(lineToProcess);
 
       // 2. Redact secrets
       const redactedLine = redactSecrets(cleanLine, customPatterns);
