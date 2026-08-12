@@ -7,6 +7,11 @@
 export const DEFAULT_ERROR_SIGNATURES: string[] = [
   'ERROR:',
   'Error:',
+  'error:',
+  'error TS',
+  'npm ERR!',
+  'yarn error',
+  'pip error',
   'FAIL',
   'FAILED',
   'FAILURE',
@@ -33,6 +38,9 @@ export const DEFAULT_ERROR_SIGNATURES: string[] = [
   '502',
   '503',
   '504',
+  '×',
+  'yaml:',
+  'undefined:',
 ];
 
 /**

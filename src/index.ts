@@ -9,3 +9,4 @@ export * from './parser/fingerprint.js';
 export * from './parser/error-patterns.js';
 export * from './parser/context-window.js';
 export * from './parser/stream-parser.js';
+export * from './detectors/index.js';
