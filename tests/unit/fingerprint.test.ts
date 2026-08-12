@@ -18,10 +18,72 @@ describe('Canonical Fingerprinting System', () => {
     expect(normalized).toBe('<TIMESTAMP> Error occurred at <TIMESTAMP>');
   });
 
-  it('should normalize IP addresses and ports', () => {
-    const line = 'Failed to connect to 10.20.4.8:443 and 192.168.1.50';
-    const normalized = normalizeVolatileValues(line);
-    expect(normalized).toBe('Failed to connect to <IP>:<PORT> and <IP>');
+  it('should normalize IPv4, IPv6 (full, compressed, bracketed), and preserve non-IP colon-separated text', () => {
+    const ipv4Line = 'Failed to connect to 10.20.4.8:443 and 192.168.1.50';
+    expect(normalizeVolatileValues(ipv4Line)).toBe('Failed to connect to <IP>:<PORT> and <IP>');
+
+    const ipv6Compressed1 = 'Connect failed to ::1';
+    expect(normalizeVolatileValues(ipv6Compressed1)).toBe('Connect failed to <IP>');
+
+    const ipv6Compressed2 = 'Host 2001:db8::1 unreachable';
+    expect(normalizeVolatileValues(ipv6Compressed2)).toBe('Host <IP> unreachable');
+
+    const ipv6Compressed3 = 'Link fe80::1 down';
+    expect(normalizeVolatileValues(ipv6Compressed3)).toBe('Link <IP> down');
+
+    const ipv6Bracketed = 'Binding [2001:db8::1]:8080 and [::1]';
+    expect(normalizeVolatileValues(ipv6Bracketed)).toBe('Binding <IP>:<PORT> and <IP>');
+
+    // Non-IP colon-separated text must NOT be destroyed
+    const nonIpText = 'Error: step: build failed at main (file.js:12:34)';
+    expect(normalizeVolatileValues(nonIpText)).toBe(nonIpText);
+  });
+
+  it('should normalize hashes only when contextual evidence exists and preserve arbitrary long hex IDs', () => {
+    // 1. Contextual hash -> normalized
+    const contextualHashes = [
+      'sha256: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
+      'sha1: 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b',
+      'hash=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4',
+      'digest=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4',
+      'checksum=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4',
+      'build hash a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4',
+    ];
+
+    for (const line of contextualHashes) {
+      const normalized = normalizeVolatileValues(line);
+      expect(normalized).toContain('<HASH>');
+      expect(normalized).not.toContain('a1b2c3d4e5f6');
+    }
+
+    // 2. Arbitrary long hex error identifier -> preserved
+    const arbitraryHexLine1 =
+      'Error ERR_E3F1A2B3C4D5E6F7A8B9C0D1E2F3A4B5: transaction state mismatch';
+    const arbitraryHexLine2 =
+      'Error ERR_9999A2B3C4D5E6F7A8B9C0D1E2F3A4B5: transaction state mismatch';
+
+    const normalized1 = normalizeVolatileValues(arbitraryHexLine1);
+    const normalized2 = normalizeVolatileValues(arbitraryHexLine2);
+
+    expect(normalized1).toBe(arbitraryHexLine1);
+    expect(normalized2).toBe(arbitraryHexLine2);
+
+    const fp1 = generateFingerprint(arbitraryHexLine1);
+    const fp2 = generateFingerprint(arbitraryHexLine2);
+    expect(fp1.canonicalHash).not.toBe(fp2.canonicalHash);
+
+    // 3. Meaningful numeric assertions remain unchanged
+    const assertion1 = 'AssertionError: Expected 2 but received 5';
+    const assertion2 = 'AssertionError: Expected 2 but received 7';
+    expect(normalizeVolatileValues(assertion1)).toBe(assertion1);
+    expect(normalizeVolatileValues(assertion2)).toBe(assertion2);
+
+    // 4. Existing commit/revision normalization still works
+    const commitLine = 'Deployed commit 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b successfully';
+    const revisionLine = 'Deployed revision: 1a2b3c4 successfully';
+
+    expect(normalizeVolatileValues(commitLine)).toBe('Deployed commit <COMMIT_SHA> successfully');
+    expect(normalizeVolatileValues(revisionLine)).toBe('Deployed commit <COMMIT_SHA> successfully');
   });
 
   it('should normalize UUIDs and request IDs', () => {

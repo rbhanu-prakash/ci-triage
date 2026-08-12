@@ -57,8 +57,18 @@ export function normalizeVolatileValues(text: string): string {
   normalized = normalized.replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b/g, (match) => {
     return match.includes(':') ? '<IP>:<PORT>' : '<IP>';
   });
-  // IPv6 with optional port
-  normalized = normalized.replace(/\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b/g, '<IP>');
+  // Bracketed IPv6 with optional port: [2001:db8::1]:8080 or [::1]
+  normalized = normalized.replace(/\[([0-9a-fA-F:]+)\](?::(\d{1,5}))?/g, (_match, ip, port) => {
+    if (ip.includes(':') && /^[0-9a-fA-F:]+$/.test(ip)) {
+      return port ? '<IP>:<PORT>' : '<IP>';
+    }
+    return _match;
+  });
+  // Unbracketed IPv6 (full or compressed): 2001:db8::1, fe80::1, ::1, 2001:0db8:85a3:0000:0000:8a2e:0370:7334
+  normalized = normalized.replace(
+    /\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b|(?:::(?:[0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4}\b|::\b)|\b(?:[0-9a-fA-F]{1,4}:){1,7}::|\b(?:[0-9a-fA-F]{1,4}:){1,6}:(?:[0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4}\b/g,
+    '<IP>',
+  );
   // Explicit port references: "port 8080"
   normalized = normalized.replace(/\bport\s+\d{2,5}\b/gi, 'port <PORT>');
 
@@ -77,8 +87,11 @@ export function normalizeVolatileValues(text: string): string {
   // 5. Memory addresses (0x7fff5fbff600)
   normalized = normalized.replace(/\b0x[0-9a-fA-F]{8,16}\b/g, '<HEX_ADDR>');
 
-  // 6. Long hex strings (32+ hex chars: hashes, build IDs)
-  normalized = normalized.replace(/\b[0-9a-fA-F]{32,64}\b/g, '<HASH>');
+  // 6. Hashes / Digests / Build IDs with explicit contextual evidence
+  normalized = normalized.replace(
+    /\b(sha(?:256|512|1)|md5|hash|digest|checksum|build\s+hash|build\s+id|build[-_]?(?:id|hash)?)\b(\s*[:= ]\s*)([0-9a-fA-F]{32,128})\b/gi,
+    (_match, prefix, sep) => `${prefix}${sep}<HASH>`,
+  );
 
   // 7. Temporary / Runner directories
   // /tmp/... or /home/runner/work/... or /home/runner/_temp/...
@@ -94,7 +107,7 @@ export function normalizeVolatileValues(text: string): string {
 
   // 9. Git commit SHAs in explicit git/commit context
   normalized = normalized.replace(
-    /\b(?:commit|revision)\s+[0-9a-fA-F]{7,40}\b/gi,
+    /\b(?:commit|revision)\s*[:=]?\s*[0-9a-fA-F]{7,40}\b/gi,
     'commit <COMMIT_SHA>',
   );
 
