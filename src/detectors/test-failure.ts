@@ -8,7 +8,7 @@ const TEST_SUMMARY_PATTERN =
 const TEST_FAIL_HEADER_PATTERN =
   /^\s*(?:FAIL|FAILED|×)\s+([a-zA-Z0-9_\-./]+(?:::[a-zA-Z0-9_\-./]+)?)/im;
 const ASSERTION_PATTERN =
-  /\b(?:AssertionError|expect\((?:received|actual)\)|Expected:.*Received:|-\s*Expected:|\+\s*Received:)\b/i;
+  /\b(?:AssertionError|expect\((?:received|actual)\)|Expected:[\s\S]*?Received:|-\s*Expected:|\+\s*Received:)/i;
 
 export class TestFailureDetector implements Detector {
   public readonly id = 'test_failure';
@@ -24,7 +24,10 @@ export class TestFailureDetector implements Detector {
     let primaryRawError = '';
     let fileLocation: string | undefined;
 
-    let matchCount = 0;
+    let hasSummary = false;
+    let hasHeader = false;
+    let hasAssertion = false;
+    let totalMatches = 0;
 
     for (const frame of parseResult.frames) {
       const allLines = [frame.rawErrorLine, ...frame.linesBefore, ...frame.linesAfter].join('\n');
@@ -32,13 +35,14 @@ export class TestFailureDetector implements Detector {
       // Check test runner summary
       const summaryMatch = TEST_SUMMARY_PATTERN.exec(allLines);
       if (summaryMatch) {
-        matchCount++;
+        hasSummary = true;
+        totalMatches++;
         evidence.push(
           createEvidenceItem(
             `test_summary_${frame.id}`,
             'log_signature',
             `Observed test runner failure summary: "${summaryMatch[0].trim()}"`,
-            95,
+            90,
             summaryMatch[0],
           ),
         );
@@ -48,7 +52,8 @@ export class TestFailureDetector implements Detector {
       // Check test fail header
       const failHeaderMatch = TEST_FAIL_HEADER_PATTERN.exec(allLines);
       if (failHeaderMatch) {
-        matchCount++;
+        hasHeader = true;
+        totalMatches++;
         const target = failHeaderMatch[1];
         if (!fileLocation && target.includes('.')) {
           fileLocation = target.split('::')[0];
@@ -58,7 +63,7 @@ export class TestFailureDetector implements Detector {
             `test_header_${frame.id}`,
             'log_signature',
             `Observed failing test signature: "${failHeaderMatch[0].trim()}"`,
-            90,
+            85,
             failHeaderMatch[0],
           ),
         );
@@ -68,13 +73,14 @@ export class TestFailureDetector implements Detector {
       // Check assertion error
       const assertionMatch = ASSERTION_PATTERN.exec(allLines);
       if (assertionMatch) {
-        matchCount++;
+        hasAssertion = true;
+        totalMatches++;
         evidence.push(
           createEvidenceItem(
             `test_assertion_${frame.id}`,
             'log_signature',
             `Observed test assertion failure: "${frame.rawErrorLine.slice(0, 150)}"`,
-            85,
+            55,
             frame.rawErrorLine,
           ),
         );
@@ -82,11 +88,28 @@ export class TestFailureDetector implements Detector {
       }
     }
 
-    if (matchCount === 0 || evidence.length === 0) {
+    if (totalMatches === 0 || evidence.length === 0) {
       return null;
     }
 
-    const confidenceScore = Math.min(100, 75 + matchCount * 10);
+    // Conservative evidence-weighted confidence calculation
+    let baseConfidence = 0;
+    if (hasSummary && hasHeader) {
+      baseConfidence = 85;
+    } else if (hasSummary) {
+      baseConfidence = 80;
+    } else if (hasHeader) {
+      baseConfidence = 75;
+    } else if (hasAssertion) {
+      // Weak assertion-only evidence
+      baseConfidence = 55;
+    }
+
+    // Boost if multiple independent signals exist
+    const uniqueSignalTypes = (hasSummary ? 1 : 0) + (hasHeader ? 1 : 0) + (hasAssertion ? 1 : 0);
+    const signalBonus = uniqueSignalTypes === 3 ? 10 : uniqueSignalTypes === 2 ? 5 : 0;
+
+    const confidenceScore = Math.min(95, baseConfidence + signalBonus);
     const fingerprintLine = primaryRawError || parseResult.frames[0].rawErrorLine;
     const fingerprint = generateFingerprint(
       fingerprintLine,
