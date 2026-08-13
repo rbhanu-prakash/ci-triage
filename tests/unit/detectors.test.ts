@@ -482,7 +482,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
   });
 
   describe('BuildDetector', () => {
-    it('should detect TypeScript compilation errors', async () => {
+    it('explicit compiler error -> high confidence BUILD (95)', async () => {
       const log =
         'Error: src/index.ts(15,8): error TS2307: Cannot find module "./missing" or its corresponding type declarations.';
       const parseResult = await parseLogStream(createStringLogProvider(log));
@@ -490,21 +490,43 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
       const result = detector.detect({ context: createMockContext(), parseResult });
 
       expect(result?.category).toBe('BUILD');
-      expect(result?.confidenceScore).toBe(90);
+      expect(result?.confidenceScore).toBe(95);
     });
 
-    it('should detect bundler build failure signatures', async () => {
+    it('bundler error -> high confidence BUILD (90)', async () => {
       const log = 'Error: [vite] Build failed with errors in src/main.ts';
       const parseResult = await parseLogStream(createStringLogProvider(log));
       const detector = new BuildDetector();
       const result = detector.detect({ context: createMockContext(), parseResult });
 
       expect(result?.category).toBe('BUILD');
+      expect(result?.confidenceScore).toBe(90);
+    });
+
+    it('test-time SyntaxError without build context -> moderate/non-high confidence (60)', async () => {
+      const log = "SyntaxError: Unexpected token ';' in test execution frame";
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new BuildDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result?.category).toBe('BUILD');
+      expect(result?.confidenceScore).toBe(60);
     });
   });
 
   describe('ConfigurationDetector', () => {
-    it('should detect missing environment variables and invalid workflow YAML syntax', async () => {
+    it('invalid YAML -> high confidence (95)', async () => {
+      const log =
+        'Error: Failed to parse workflow YAML file: yaml: line 12: mapping values are not allowed';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new ConfigurationDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result?.category).toBe('CONFIGURATION');
+      expect(result?.confidenceScore).toBe(95);
+    });
+
+    it('missing required secret/env -> high confidence (90)', async () => {
       const log = 'Error: Environment variable DATABASE_URL is required but not set';
       const parseResult = await parseLogStream(createStringLogProvider(log));
       const detector = new ConfigurationDetector();
@@ -512,6 +534,26 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
 
       expect(result?.category).toBe('CONFIGURATION');
       expect(result?.confidenceScore).toBe(90);
+    });
+
+    it('invalid action input -> high confidence (90)', async () => {
+      const log = 'Error: Invalid action input: parameter "target" is required';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new ConfigurationDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result?.category).toBe('CONFIGURATION');
+      expect(result?.confidenceScore).toBe(90);
+    });
+
+    it('generic package.json/config-file missing -> moderate confidence (60)', async () => {
+      const log = 'Error: package.json not found in working directory';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new ConfigurationDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result?.category).toBe('CONFIGURATION');
+      expect(result?.confidenceScore).toBe(60);
     });
   });
 

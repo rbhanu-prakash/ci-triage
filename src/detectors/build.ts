@@ -48,19 +48,6 @@ export class BuildDetector implements Detector {
       }
 
       const syntaxMatch = SYNTAX_PATTERN.exec(allLines);
-      if (syntaxMatch) {
-        evidence.push(
-          createEvidenceItem(
-            `build_syntax_${frame.id}`,
-            'log_signature',
-            `Observed syntax error: "${frame.rawErrorLine.slice(0, 150)}"`,
-            90,
-            frame.rawErrorLine,
-          ),
-        );
-        if (!primaryRawError) primaryRawError = frame.rawErrorLine;
-      }
-
       const bundlerMatch = BUNDLER_PATTERN.exec(allLines);
       if (bundlerMatch) {
         evidence.push(
@@ -88,13 +75,34 @@ export class BuildDetector implements Detector {
         );
         if (!primaryRawError) primaryRawError = frame.rawErrorLine;
       }
+
+      if (syntaxMatch) {
+        const hasExplicitCompilerOrBundler = tsMatch || bundlerMatch || compilerMatch;
+        const hasBuildContext =
+          hasExplicitCompilerOrBundler ||
+          /\b(?:build|compile|compiling|compilation|tsc|webpack|vite|esbuild|rollup|next build|turbo build|cargo build|go build|npm run build|yarn build|pnpm build|ng build|make|gcc|g\+\+)\b/i.test(
+            allLines,
+          );
+        const score = hasBuildContext ? 80 : 60;
+
+        evidence.push(
+          createEvidenceItem(
+            `build_syntax_${frame.id}`,
+            'log_signature',
+            `Observed syntax error: "${frame.rawErrorLine.slice(0, 150)}"`,
+            score,
+            frame.rawErrorLine,
+          ),
+        );
+        if (!primaryRawError) primaryRawError = frame.rawErrorLine;
+      }
     }
 
     if (evidence.length === 0) {
       return null;
     }
 
-    const confidenceScore = 90;
+    const confidenceScore = Math.max(...evidence.map((e) => e.relevanceScore));
     const fingerprint = generateFingerprint(
       primaryRawError || parseResult.frames[0].rawErrorLine,
       context.config.customSecretPatterns,

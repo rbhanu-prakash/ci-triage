@@ -70,12 +70,17 @@ export class ConfigurationDetector implements Detector {
       }
 
       if (MISSING_CONFIG_FILE_PATTERN.test(allLines)) {
+        const hasConfigContext =
+          /\b(?:workflow|action input|secret|env variable|invalid configuration|config validation|failed to initialize config)\b/i.test(
+            allLines,
+          );
+        const score = hasConfigContext ? 80 : 60;
         evidence.push(
           createEvidenceItem(
             `config_file_${frame.id}`,
             'log_signature',
             `Observed missing configuration file error: "${frame.rawErrorLine.slice(0, 150)}"`,
-            85,
+            score,
             frame.rawErrorLine,
           ),
         );
@@ -87,7 +92,7 @@ export class ConfigurationDetector implements Detector {
       return null;
     }
 
-    const confidenceScore = 90;
+    const confidenceScore = Math.max(...evidence.map((e) => e.relevanceScore));
     const fingerprint = generateFingerprint(
       primaryRawError || parseResult.frames[0].rawErrorLine,
       context.config.customSecretPatterns,
