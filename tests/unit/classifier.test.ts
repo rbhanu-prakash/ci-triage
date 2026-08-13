@@ -565,4 +565,326 @@ describe('Classifier (Phase 4)', () => {
     expect(report.classification).toBe('NETWORK');
     expect(report.secondarySignals?.some((s) => s.category === 'CODE_REGRESSION')).toBe(true);
   });
+
+  it('19. NETWORK + unrelated TEST_FAILURE yields no corroboration bonus', () => {
+    const results: DetectorResult[] = [
+      {
+        category: 'NETWORK',
+        confidenceScore: 85,
+        evidence: [
+          {
+            id: 'net1',
+            source: 'log_signature',
+            description: 'Connection refused to registry.npmjs.org',
+            relevanceScore: 85,
+            detectorCategory: 'NETWORK',
+            detectorId: 'network_detector',
+          },
+        ],
+      },
+      {
+        category: 'TEST_FAILURE',
+        confidenceScore: 70,
+        evidence: [
+          {
+            id: 'tf1',
+            source: 'log_signature',
+            description: 'Unrelated assertion error in auth test',
+            relevanceScore: 70,
+            detectorCategory: 'TEST_FAILURE',
+            detectorId: 'test_failure_detector',
+          },
+        ],
+      },
+    ];
+
+    const report = classifier.classify(results);
+
+    expect(report.classification).toBe('NETWORK');
+    // Base 85 (runner up TEST_FAILURE 70 is < 75 threshold, no conflict penalty; no corroboration bonus)
+    expect(report.confidence).toBe(85);
+  });
+
+  it('20. DEPENDENCY + registry NETWORK evidence supporting the same failure yields bounded corroboration bonus', () => {
+    const results: DetectorResult[] = [
+      {
+        category: 'DEPENDENCY',
+        confidenceScore: 80,
+        evidence: [
+          {
+            id: 'ev1',
+            source: 'log_signature',
+            description: 'Package resolution failed',
+            snippet: 'ERESOLVE unable to resolve',
+            relevanceScore: 80,
+            detectorCategory: 'DEPENDENCY',
+            detectorId: 'dependency_detector',
+          },
+        ],
+      },
+      {
+        category: 'NETWORK',
+        confidenceScore: 75,
+        evidence: [
+          {
+            id: 'ev2',
+            source: 'log_signature',
+            description: 'Package resolution failed',
+            snippet: 'ERESOLVE unable to resolve',
+            relevanceScore: 75,
+            detectorCategory: 'NETWORK',
+            detectorId: 'network_detector',
+          },
+        ],
+      },
+    ];
+
+    const report = classifier.classify(results);
+
+    expect(report.classification).toBe('DEPENDENCY');
+    // EvidenceEngine merges both into 1 item with 2 contributing detectors (DEPENDENCY and NETWORK).
+    // Base 80 + 5 (multi-detector corroboration bonus) - 15 (conflict penalty) = 70
+    expect(report.observedEvidence[0].contributingDetectors).toHaveLength(2);
+    expect(report.confidence).toBe(70);
+  });
+
+  it('21. duplicate evidence from same detector does not create multiple corroboration bonuses', () => {
+    const results: DetectorResult[] = [
+      {
+        category: 'DEPENDENCY',
+        confidenceScore: 80,
+        evidence: [
+          {
+            id: 'ev1',
+            source: 'log_signature',
+            description: 'Package resolution failed',
+            snippet: 'ERESOLVE unable to resolve',
+            relevanceScore: 80,
+            detectorCategory: 'DEPENDENCY',
+            detectorId: 'dependency_detector',
+          },
+          {
+            id: 'ev2',
+            source: 'log_signature',
+            description: 'Package resolution failed',
+            snippet: 'ERESOLVE unable to resolve',
+            relevanceScore: 80,
+            detectorCategory: 'DEPENDENCY',
+            detectorId: 'dependency_detector',
+          },
+        ],
+      },
+    ];
+
+    const report = classifier.classify(results);
+
+    expect(report.observedEvidence).toHaveLength(1);
+    expect(report.confidence).toBe(80);
+  });
+
+  it('22. unrelated detector categories do not inflate primary confidence', () => {
+    const results: DetectorResult[] = [
+      {
+        category: 'PERMISSION',
+        confidenceScore: 90,
+        evidence: [
+          {
+            id: 'p1',
+            source: 'log_signature',
+            description: 'HTTP 403 Forbidden on API request',
+            relevanceScore: 90,
+            detectorCategory: 'PERMISSION',
+          },
+        ],
+      },
+      {
+        category: 'RESOURCE',
+        confidenceScore: 60,
+        evidence: [
+          {
+            id: 'r1',
+            source: 'log_signature',
+            description: 'Unrelated high disk usage warning',
+            relevanceScore: 60,
+            detectorCategory: 'RESOURCE',
+          },
+        ],
+      },
+    ];
+
+    const report = classifier.classify(results);
+
+    expect(report.classification).toBe('PERMISSION');
+    expect(report.confidence).toBe(90);
+  });
+
+  it('23. BUILD 80 vs TEST_FAILURE 90 keeps TEST_FAILURE as primary', () => {
+    const results: DetectorResult[] = [
+      {
+        category: 'BUILD',
+        confidenceScore: 80,
+        evidence: [
+          {
+            id: 'b1',
+            source: 'log_signature',
+            description: 'Build step finished with warnings',
+            relevanceScore: 80,
+          },
+        ],
+      },
+      {
+        category: 'TEST_FAILURE',
+        confidenceScore: 90,
+        evidence: [
+          {
+            id: 'tf1',
+            source: 'log_signature',
+            description: 'AssertionError: expected true to be false',
+            relevanceScore: 90,
+          },
+        ],
+      },
+    ];
+
+    const report = classifier.classify(results);
+
+    expect(report.classification).toBe('TEST_FAILURE');
+    expect(report.secondarySignals?.some((s) => s.category === 'BUILD')).toBe(true);
+  });
+
+  it('24. BUILD 95 vs TEST_FAILURE 80 selects BUILD as primary', () => {
+    const results: DetectorResult[] = [
+      {
+        category: 'BUILD',
+        confidenceScore: 95,
+        evidence: [
+          {
+            id: 'b1',
+            source: 'log_signature',
+            description: 'Compilation failed with error TS2304',
+            relevanceScore: 95,
+          },
+        ],
+      },
+      {
+        category: 'TEST_FAILURE',
+        confidenceScore: 80,
+        evidence: [
+          {
+            id: 'tf1',
+            source: 'log_signature',
+            description: 'Test runner exited',
+            relevanceScore: 80,
+          },
+        ],
+      },
+    ];
+
+    const report = classifier.classify(results);
+
+    expect(report.classification).toBe('BUILD');
+  });
+
+  it('25. explicit compiler evidence + weak test signal selects BUILD as primary', () => {
+    const results: DetectorResult[] = [
+      {
+        category: 'BUILD',
+        confidenceScore: 80,
+        evidence: [
+          {
+            id: 'b1',
+            source: 'log_signature',
+            description: 'TypeScript error TS2307: Cannot find module ./auth',
+            snippet: 'tsc --build failed',
+            relevanceScore: 80,
+          },
+        ],
+      },
+      {
+        category: 'TEST_FAILURE',
+        confidenceScore: 65,
+        evidence: [
+          {
+            id: 'tf1',
+            source: 'log_signature',
+            description: 'Test suite failed to run',
+            relevanceScore: 65,
+          },
+        ],
+      },
+    ];
+
+    const report = classifier.classify(results);
+
+    expect(report.classification).toBe('BUILD');
+    expect(report.inferenceDetails).toContain('due to explicit compiler/bundler failure evidence');
+  });
+
+  it('26. ambiguous generic syntax error + strong test failure keeps TEST_FAILURE as primary', () => {
+    const results: DetectorResult[] = [
+      {
+        category: 'BUILD',
+        confidenceScore: 75,
+        evidence: [
+          {
+            id: 'b1',
+            source: 'log_signature',
+            description: 'Syntax error observed in output stream',
+            snippet: 'syntax error',
+            relevanceScore: 75,
+          },
+        ],
+      },
+      {
+        category: 'TEST_FAILURE',
+        confidenceScore: 88,
+        evidence: [
+          {
+            id: 'tf1',
+            source: 'log_signature',
+            description: 'Explicit failure in UserAuthSuite.test.ts',
+            relevanceScore: 88,
+          },
+        ],
+      },
+    ];
+
+    const report = classifier.classify(results);
+
+    expect(report.classification).toBe('TEST_FAILURE');
+  });
+
+  it('27. resolution reasoning does not claim unsupported temporal ordering', () => {
+    const results: DetectorResult[] = [
+      {
+        category: 'BUILD',
+        confidenceScore: 95,
+        evidence: [
+          {
+            id: 'b1',
+            source: 'log_signature',
+            description: 'TypeScript compilation failed',
+            relevanceScore: 95,
+          },
+        ],
+      },
+      {
+        category: 'TEST_FAILURE',
+        confidenceScore: 80,
+        evidence: [
+          {
+            id: 'tf1',
+            source: 'log_signature',
+            description: 'Test failed',
+            relevanceScore: 80,
+          },
+        ],
+      },
+    ];
+
+    const report = classifier.classify(results);
+
+    expect(report.inferenceDetails).not.toContain('precedes');
+    expect(report.inferenceDetails).not.toContain('downstream');
+  });
 });

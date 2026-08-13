@@ -150,18 +150,26 @@ export class Classifier {
     const flakyCand = findCategory('FLAKY_TEST');
     const regCand = findCategory('CODE_REGRESSION');
 
-    // Conflict Rule A: Upstream BUILD vs Downstream TEST_FAILURE
+    // Conflict Rule A: BUILD vs TEST_FAILURE
     if (buildCand && testCand) {
-      // BUILD overrides TEST_FAILURE only if BUILD score is competitive (within 10 points or higher)
-      if (
-        buildCand.confidenceScore >= testCand.confidenceScore - 10 &&
-        buildCand.confidenceScore >= 75
-      ) {
-        if (primary.category !== 'BUILD') {
-          primary = buildCand;
-          resolutionReason =
-            'Selected BUILD as primary cause because compiler/build error precedes downstream test failure.';
+      const isCompilerEvidence = buildCand.evidence.some((e) =>
+        /compiler|tsc|esbuild|webpack|babel|vite|rollup|type\s*error|compilation\s*failed|transpile/i.test(
+          e.description + ' ' + (e.snippet || ''),
+        ),
+      );
+      const isWeakTestSignal = testCand.confidenceScore < 75;
+      const isBuildMateriallyStronger = buildCand.confidenceScore >= testCand.confidenceScore + 10;
+
+      if (isCompilerEvidence && isWeakTestSignal) {
+        primary = buildCand;
+        resolutionReason = `Selected BUILD as primary cause due to explicit compiler/bundler failure evidence overriding weak test failure signal (${testCand.confidenceScore}).`;
+      } else if (isBuildMateriallyStronger) {
+        primary = buildCand;
+        if (sorted[0].category !== 'BUILD') {
+          resolutionReason = `Selected BUILD as primary cause because build error signal (${buildCand.confidenceScore}) is materially stronger than test failure signal (${testCand.confidenceScore}).`;
         }
+      } else if (testCand.confidenceScore >= buildCand.confidenceScore) {
+        primary = testCand;
       }
     }
     // Conflict Rule B: Systemic NETWORK overriding weaker CODE_REGRESSION or TEST_FAILURE
@@ -272,14 +280,16 @@ export class Classifier {
       score += Math.min(10, multiDetectorEvidenceCount * 5);
     }
 
-    // Check for independent candidate detectors corroborating the primary category
-    const corroboratingCandidatesCount = candidates.filter(
+    // Check for independent candidate detectors sharing the same non-empty fingerprint
+    const matchingFingerprintCandidates = candidates.filter(
       (c) =>
         c.category !== primary.category &&
-        (c.category === 'TEST_FAILURE' || c.category === 'BUILD' || c.category === 'DEPENDENCY'),
-    ).length;
-    if (corroboratingCandidatesCount > 0 && primary.confidenceScore >= 75) {
-      score += Math.min(5, corroboratingCandidatesCount * 5);
+        Boolean(c.fingerprint) &&
+        Boolean(primary.fingerprint) &&
+        c.fingerprint === primary.fingerprint,
+    );
+    if (matchingFingerprintCandidates.length > 0) {
+      score += Math.min(5, matchingFingerprintCandidates.length * 5);
     }
 
     // 3. Source Diversity: evidence spanning multiple distinct sources
