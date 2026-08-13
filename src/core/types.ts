@@ -86,6 +86,14 @@ export interface EvidenceItem {
   description: string;
   snippet?: string;
   relevanceScore: number; // 0 - 100
+  detectorCategory?: FailureCategory;
+  detectorId?: string;
+}
+
+export interface SecondarySignal {
+  category: FailureCategory;
+  confidence: number;
+  description?: string;
 }
 
 export interface DetectorResult {
@@ -105,6 +113,7 @@ export interface TriageReport {
   recommendedAction: string;
   jobName: string;
   stepName: string;
+  secondarySignals?: SecondarySignal[];
   metadata: {
     historyAnalyzed: number;
     logBytesProcessed: number;
