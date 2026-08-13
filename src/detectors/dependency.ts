@@ -2,11 +2,19 @@ import { Detector, DetectorInput, createEvidenceItem } from './base.js';
 import { DetectorResult, EvidenceItem } from '../core/types.js';
 import { generateFingerprint } from '../parser/fingerprint.js';
 
+type DependencySignalCategory =
+  | 'PKG_RESOLUTION'
+  | 'PKG_NOT_FOUND'
+  | 'DEPENDENCY_CONFLICT'
+  | 'LOCKFILE_MISMATCH'
+  | 'ENGINE_MISMATCH'
+  | 'VERSION_CONSTRAINT';
+
 const PKG_RESOLUTION_PATTERN =
   /\b(?:npm ERR! code (?:E404|ERESOLVE|ENOENT|ETARGET|EINVALIDPACKAGENAME)|yarn error|pip error: No matching distribution found|pip error: Could not find a version|ERROR: Could not find a version|ERROR: No matching distribution found)\b/i;
 
 const PKG_NOT_FOUND_PATTERN =
-  /\b(?:No matching version found for|Could not find a version that satisfies the requirement|Package ['"][^'"]+['"] not found|404 Not Found - GET https?:\/\/(?:registry\.npmjs\.org|pypi\.org|pkg\.go\.dev)|'[^']+' is not in the npm registry)\b/i;
+  /\b(?:No matching version found for|Could not find a version that satisfies the requirement|Package ['"][^'"]+['"] not found|(?:404|500|502|503)\b.*https?:\/\/(?:registry\.npmjs\.org|pypi\.org|pkg\.go\.dev|crates\.io|rubygems\.org)|'[^']+' is not in the npm registry)\b/i;
 
 const DEPENDENCY_CONFLICT_PATTERN =
   /\b(?:unable to resolve dependency tree|peer dependency missing|Unmet peer dependency|Conflicting peer dependency|peer dep missing|EPEERINVALID)\b/i;
@@ -16,6 +24,9 @@ const LOCKFILE_PATTERN =
 
 const ENGINE_MISMATCH_PATTERN =
   /\b(?:Unsupported engine|The engine "[^"]+" is incompatible|Requires node [^\s]+|Requires Python [^\s]+)\b/i;
+
+const VERSION_CONSTRAINT_PATTERN =
+  /\b(?:Incompatible version constraint|No compatible version found|Version mismatch for package)\b/i;
 
 export class DependencyDetector implements Detector {
   public readonly id = 'dependency';
@@ -28,12 +39,14 @@ export class DependencyDetector implements Detector {
     }
 
     const evidence: EvidenceItem[] = [];
+    const detectedCategories = new Map<DependencySignalCategory, number>();
     let primaryRawError = '';
 
     for (const frame of parseResult.frames) {
       const allLines = [frame.rawErrorLine, ...frame.linesBefore, ...frame.linesAfter].join('\n');
 
       if (PKG_RESOLUTION_PATTERN.test(allLines)) {
+        detectedCategories.set('PKG_RESOLUTION', 95);
         evidence.push(
           createEvidenceItem(
             `dep_resolution_${frame.id}`,
@@ -47,6 +60,7 @@ export class DependencyDetector implements Detector {
       }
 
       if (PKG_NOT_FOUND_PATTERN.test(allLines)) {
+        detectedCategories.set('PKG_NOT_FOUND', 95);
         evidence.push(
           createEvidenceItem(
             `dep_not_found_${frame.id}`,
@@ -60,6 +74,7 @@ export class DependencyDetector implements Detector {
       }
 
       if (DEPENDENCY_CONFLICT_PATTERN.test(allLines)) {
+        detectedCategories.set('DEPENDENCY_CONFLICT', 90);
         evidence.push(
           createEvidenceItem(
             `dep_conflict_${frame.id}`,
@@ -73,6 +88,7 @@ export class DependencyDetector implements Detector {
       }
 
       if (LOCKFILE_PATTERN.test(allLines)) {
+        detectedCategories.set('LOCKFILE_MISMATCH', 90);
         evidence.push(
           createEvidenceItem(
             `dep_lockfile_${frame.id}`,
@@ -86,12 +102,27 @@ export class DependencyDetector implements Detector {
       }
 
       if (ENGINE_MISMATCH_PATTERN.test(allLines)) {
+        detectedCategories.set('ENGINE_MISMATCH', 75);
         evidence.push(
           createEvidenceItem(
             `dep_engine_${frame.id}`,
             'log_signature',
             `Observed engine/environment version mismatch: "${frame.rawErrorLine.slice(0, 150)}"`,
-            85,
+            75,
+            frame.rawErrorLine,
+          ),
+        );
+        if (!primaryRawError) primaryRawError = frame.rawErrorLine;
+      }
+
+      if (VERSION_CONSTRAINT_PATTERN.test(allLines)) {
+        detectedCategories.set('VERSION_CONSTRAINT', 75);
+        evidence.push(
+          createEvidenceItem(
+            `dep_version_${frame.id}`,
+            'log_signature',
+            `Observed version constraint mismatch: "${frame.rawErrorLine.slice(0, 150)}"`,
+            75,
             frame.rawErrorLine,
           ),
         );
@@ -99,11 +130,18 @@ export class DependencyDetector implements Detector {
       }
     }
 
-    if (evidence.length === 0) {
+    if (evidence.length === 0 || detectedCategories.size === 0) {
       return null;
     }
 
-    const confidenceScore = Math.min(100, 80 + evidence.length * 5);
+    // Signal-strength weighted confidence score
+    // Highest base weight among detected DISTINCT signal categories
+    const maxBaseWeight = Math.max(...Array.from(detectedCategories.values()));
+
+    // Distinct category bonus: +5 per additional distinct signal category
+    const distinctBonus = (detectedCategories.size - 1) * 5;
+    const confidenceScore = Math.min(100, maxBaseWeight + distinctBonus);
+
     const fingerprint = generateFingerprint(
       primaryRawError || parseResult.frames[0].rawErrorLine,
       context.config.customSecretPatterns,

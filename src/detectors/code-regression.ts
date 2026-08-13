@@ -27,9 +27,75 @@ export function normalizeFilePath(path: string): string {
   return cleaned.trim();
 }
 
-// Regex to detect file paths in stack traces / test runners / error logs
+function stripExtension(path: string): string {
+  return path.replace(/\.(?:d\.ts|tsx?|jsx?|mjs|cjs|py|go|rs|java|rb|php|cs)$/i, '');
+}
+
+/**
+ * Checks if a candidate file path from log correlates with a changed file path from PR.
+ * Prevents overly broad endsWith collisions (e.g., "a/b/index.ts" matching "x/y/index.ts").
+ */
+export function isPathMatch(
+  candidatePath: string,
+  changedPath: string,
+): { isMatch: boolean; isExact: boolean } {
+  const normC = normalizeFilePath(candidatePath);
+  const normR = normalizeFilePath(changedPath);
+  if (!normC || !normR) return { isMatch: false, isExact: false };
+
+  // 1. Exact path match
+  if (normC === normR) {
+    return { isMatch: true, isExact: true };
+  }
+
+  // 2. Subpath suffix match on directory boundary (e.g. "packages/auth/src/login.ts" vs "src/login.ts")
+  if (normC.endsWith('/' + normR) || normR.endsWith('/' + normC)) {
+    return { isMatch: true, isExact: false };
+  }
+
+  // 3. Extension-agnostic stem match (e.g. "dist/auth/login.js" vs "src/auth/login.ts")
+  const stemC = stripExtension(normC);
+  const stemR = stripExtension(normR);
+
+  if (stemC === stemR) {
+    return { isMatch: true, isExact: true };
+  }
+
+  if (stemC.endsWith('/' + stemR) || stemR.endsWith('/' + stemC)) {
+    return { isMatch: true, isExact: false };
+  }
+
+  // Common suffix check for build output directories (dist/..., build/...) matching source files
+  const partsC = stemC.split('/');
+  const partsR = stemR.split('/');
+
+  let commonSegments = 0;
+  while (
+    commonSegments < partsC.length &&
+    commonSegments < partsR.length &&
+    partsC[partsC.length - 1 - commonSegments] === partsR[partsR.length - 1 - commonSegments]
+  ) {
+    commonSegments++;
+  }
+
+  // If at least 2 path segments match at the tail (e.g. "auth/login"), or 1 non-generic segment
+  if (commonSegments >= 2) {
+    return { isMatch: true, isExact: false };
+  }
+  if (commonSegments === 1 && partsC[partsC.length - 1] !== 'index') {
+    return { isMatch: true, isExact: false };
+  }
+
+  return { isMatch: false, isExact: false };
+}
+
+// Regex to detect file paths in stack traces / test runners / error logs (supports Windows \ and POSIX /)
 const FILE_PATH_EXTRACT_PATTERN =
-  /\b(?:at\s+.*?\s+\()?([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+)(?::\d+)*\)?/g;
+  /\b(?:at\s+.*?\s+\()?([a-zA-Z0-9_\\\-./]+\.[a-zA-Z0-9]+)(?::\d+)*\)?/g;
+
+// Patterns indicating external systemic failures (Network, Dependency, Resource, Permission)
+const SYSTEMIC_FAILURE_PATTERN =
+  /\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ERESOLVE|EACCES|ENOSPC|heap out of memory)\b/i;
 
 export class CodeRegressionDetector implements Detector {
   public readonly id = 'code_regression';
@@ -45,51 +111,92 @@ export class CodeRegressionDetector implements Detector {
       return null;
     }
 
-    const normalizedChangedFiles = context.changedFiles.map(normalizeFilePath);
     const evidence: EvidenceItem[] = [];
     let matchedChangedFile = '';
     let primaryRawError = '';
 
+    let isExactStackTraceMatch = false;
+    let isSourceOrTestLocation = false;
+    let hasSystemicErrorSignature = false;
+
     for (const frame of parseResult.frames) {
-      const linesToSearch = [
-        frame.rawErrorLine,
-        ...(frame.fingerprint.fileLocation ? [frame.fingerprint.fileLocation] : []),
-        ...frame.linesBefore,
-        ...frame.linesAfter,
-      ];
+      const frameText = [frame.rawErrorLine, ...frame.linesBefore, ...frame.linesAfter].join('\n');
 
-      for (const line of linesToSearch) {
-        let match: RegExpExecArray | null;
-        // Reset regex state for global matching
-        FILE_PATH_EXTRACT_PATTERN.lastIndex = 0;
+      if (SYSTEMIC_FAILURE_PATTERN.test(frameText)) {
+        hasSystemicErrorSignature = true;
+      }
 
-        while ((match = FILE_PATH_EXTRACT_PATTERN.exec(line)) !== null) {
-          const candidatePath = normalizeFilePath(match[1]);
-          if (!candidatePath) continue;
-
-          // Check if candidatePath matches any changed file
-          const isMatch = normalizedChangedFiles.some(
-            (changed) =>
-              changed === candidatePath ||
-              candidatePath.endsWith(changed) ||
-              changed.endsWith(candidatePath),
-          );
-
-          if (isMatch) {
-            matchedChangedFile = candidatePath;
+      // Check frame fingerprint fileLocation (exact stack location)
+      if (frame.fingerprint.fileLocation) {
+        for (const changedFile of context.changedFiles) {
+          const matchResult = isPathMatch(frame.fingerprint.fileLocation, changedFile);
+          if (matchResult.isMatch) {
+            matchedChangedFile = changedFile;
+            isExactStackTraceMatch = true;
+            if (
+              /\b(?:src|lib|app|components|services|controllers|tests?|specs?)\b/i.test(
+                changedFile,
+              ) ||
+              /\.(?:test|spec)\.[a-z]+$/i.test(changedFile)
+            ) {
+              isSourceOrTestLocation = true;
+            }
             if (!primaryRawError) primaryRawError = frame.rawErrorLine;
 
             evidence.push(
               createEvidenceItem(
-                `diff_correlation_${frame.id}`,
+                `diff_correlation_stack_${frame.id}`,
                 'diff_correlation',
-                `Failure location "${candidatePath}" directly correlates with modified file "${candidatePath}" in pull request.`,
-                90,
-                line,
+                `Stack trace location "${frame.fingerprint.fileLocation}" directly correlates with modified pull request file "${changedFile}".`,
+                80,
+                frame.rawErrorLine,
               ),
             );
             break;
           }
+        }
+      }
+
+      if (matchedChangedFile) break;
+
+      // Extract paths from raw error line and surrounding frame lines
+      const linesToSearch = [frame.rawErrorLine, ...frame.linesBefore, ...frame.linesAfter];
+
+      for (const line of linesToSearch) {
+        FILE_PATH_EXTRACT_PATTERN.lastIndex = 0;
+        let match: RegExpExecArray | null;
+
+        while ((match = FILE_PATH_EXTRACT_PATTERN.exec(line)) !== null) {
+          const candidatePath = match[1];
+
+          for (const changedFile of context.changedFiles) {
+            const matchResult = isPathMatch(candidatePath, changedFile);
+            if (matchResult.isMatch) {
+              matchedChangedFile = changedFile;
+              if (matchResult.isExact) isExactStackTraceMatch = true;
+              if (
+                /\b(?:src|lib|app|components|services|controllers|tests?|specs?)\b/i.test(
+                  changedFile,
+                ) ||
+                /\.(?:test|spec)\.[a-z]+$/i.test(changedFile)
+              ) {
+                isSourceOrTestLocation = true;
+              }
+              if (!primaryRawError) primaryRawError = frame.rawErrorLine;
+
+              evidence.push(
+                createEvidenceItem(
+                  `diff_correlation_log_${frame.id}`,
+                  'diff_correlation',
+                  `Log line file path "${candidatePath}" correlates with modified pull request file "${changedFile}".`,
+                  60,
+                  line,
+                ),
+              );
+              break;
+            }
+          }
+          if (matchedChangedFile) break;
         }
         if (matchedChangedFile) break;
       }
@@ -100,21 +207,58 @@ export class CodeRegressionDetector implements Detector {
       return null;
     }
 
-    const minConfidence = context.config.minRegressionConfidence ?? 80;
-    const confidenceScore = Math.max(minConfidence, 85);
-
+    // Check if failure fingerprint is new/unseen in historical context
+    const primaryError = primaryRawError || parseResult.frames[0].rawErrorLine;
     const fingerprint = generateFingerprint(
-      primaryRawError || parseResult.frames[0].rawErrorLine,
+      primaryError,
       context.config.customSecretPatterns,
       matchedChangedFile || parseResult.frames[0].fingerprint.fileLocation,
     );
+
+    let isNewFingerprint = false;
+    if (context.historicalRuns && context.historicalRuns.length > 0) {
+      const existsInHistory = context.historicalRuns.some((run) =>
+        run.fingerprints.includes(fingerprint.canonicalHash),
+      );
+      if (!existsInHistory) {
+        isNewFingerprint = true;
+      }
+    }
+
+    // Calculate conservative multi-signal confidence score
+    // Base score for log mention overlap alone: 50
+    let confidenceScore = 50;
+
+    if (isExactStackTraceMatch) {
+      confidenceScore += 15; // Exact stack trace / file location correlation
+    }
+    if (isSourceOrTestLocation) {
+      confidenceScore += 10; // Source code or test file location
+    }
+    if (isNewFingerprint) {
+      confidenceScore += 10; // New/unseen failure fingerprint supporting evidence
+    }
+    if (!hasSystemicErrorSignature) {
+      confidenceScore += 5; // Absence of competing network/dep/resource signatures
+    }
+
+    // Cap confidence score
+    confidenceScore = Math.min(85, confidenceScore);
+
+    // If minRegressionConfidence threshold configured and score is lower, return null conservatively
+    if (
+      context.config.minRegressionConfidence &&
+      confidenceScore < context.config.minRegressionConfidence
+    ) {
+      return null;
+    }
 
     return {
       category: 'CODE_REGRESSION',
       confidenceScore,
       evidence,
       fingerprint,
-      suggestedAction: `Review recent pull request modifications in "${matchedChangedFile}" for logic regressions.`,
+      suggestedAction: `Review recent pull request modifications in "${matchedChangedFile}" for possible logic regressions.`,
     };
   }
 }

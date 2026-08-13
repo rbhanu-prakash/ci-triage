@@ -23,7 +23,7 @@ const mockConfig: AnalysisConfig = {
   historyDepth: 10,
   unknownThreshold: 50,
   minFlakyConfidence: 75,
-  minRegressionConfidence: 80,
+  minRegressionConfidence: 50,
   maxLogSizeBytes: 10 * 1024 * 1024,
   commentOnPR: false,
   customSecretPatterns: [],
@@ -335,25 +335,44 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
   });
 
   describe('NetworkDetector', () => {
-    it('should detect socket and DNS network connection failures', async () => {
+    it('transport failure -> high confidence NETWORK (95)', async () => {
       const log = '2026-08-12T10:00:00Z Error: connect ECONNREFUSED 127.0.0.1:5432';
       const parseResult = await parseLogStream(createStringLogProvider(log));
       const detector = new NetworkDetector();
       const result = detector.detect({ context: createMockContext(), parseResult });
 
       expect(result?.category).toBe('NETWORK');
-      expect(result?.confidenceScore).toBeGreaterThanOrEqual(90);
+      expect(result?.confidenceScore).toBe(95);
       expect(result?.evidence[0].description).toContain('ECONNREFUSED');
     });
 
-    it('should detect HTTP 502/503/504 status codes in network context', async () => {
-      const log =
-        'FetchError: request to https://api.example.com failed, reason: HTTP 503 Service Unavailable';
+    it('generic HTTP 500 -> moderate/ambiguous, not high-confidence NETWORK (60)', async () => {
+      const log = 'Error: Service returned HTTP status code 500 Internal Server Error';
       const parseResult = await parseLogStream(createStringLogProvider(log));
       const detector = new NetworkDetector();
       const result = detector.detect({ context: createMockContext(), parseResult });
 
       expect(result?.category).toBe('NETWORK');
+      expect(result?.confidenceScore).toBe(60);
+    });
+
+    it('test asserting HTTP 500 -> should not become high-confidence NETWORK (returns null)', async () => {
+      const log = 'AssertionError: expect(res.status).toBe(500)';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new NetworkDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result).toBeNull();
+    });
+
+    it('HTTP 429 without transport failure -> conservative result (60)', async () => {
+      const log = 'HTTP 429 Too Many Requests: Rate limit exceeded for endpoint /v1/telemetry';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new NetworkDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result?.category).toBe('NETWORK');
+      expect(result?.confidenceScore).toBe(60);
     });
   });
 
@@ -367,6 +386,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
 
       expect(result?.category).toBe('DEPENDENCY');
       expect(result?.evidence[0].description).toContain('package resolution');
+      expect(result?.confidenceScore).toBeGreaterThanOrEqual(95);
     });
 
     it('should detect missing package 404 and lockfile out-of-sync errors', async () => {
@@ -377,6 +397,43 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
       const result = detector.detect({ context: createMockContext(), parseResult });
 
       expect(result?.category).toBe('DEPENDENCY');
+      expect(result?.confidenceScore).toBe(95);
+    });
+
+    it('repeated overlapping regex matches on single frame do not artificially inflate confidence to 100', async () => {
+      const log = [
+        'npm ERR! code ERESOLVE',
+        'npm ERR! code ERESOLVE',
+        'npm ERR! code ERESOLVE',
+      ].join('\n');
+
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new DependencyDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result?.category).toBe('DEPENDENCY');
+      // Confidence equals max base weight (95) and NOT 80 + 3*5 = 95 or higher
+      expect(result?.confidenceScore).toBe(95);
+    });
+
+    it('unsupported engine failure yields moderate confidence (75)', async () => {
+      const log = 'npm ERR! Unsupported engine: Requires node >= 20.0.0';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new DependencyDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result?.category).toBe('DEPENDENCY');
+      expect(result?.confidenceScore).toBe(75);
+    });
+
+    it('generic HTTP failures without package registry context are NOT classified as DEPENDENCY', async () => {
+      const log =
+        'FetchError: request to https://api.internal.service/v1/data failed, reason: HTTP status 503 Service Unavailable';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new DependencyDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result).toBeNull();
     });
   });
 
@@ -485,6 +542,39 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
       const result = detector.detect({ context, parseResult });
 
       expect(result).toBeNull();
+    });
+
+    it('changed-file mention alone without stack-trace or source match yields moderate confidence (< 75)', async () => {
+      const log = 'Error: Log message mentioning file config.json in passing during build step';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const context = createMockContext(['config.json']);
+      const detector = new CodeRegressionDetector();
+      const result = detector.detect({ context, parseResult });
+
+      expect(result).not.toBeNull();
+      expect(result?.category).toBe('CODE_REGRESSION');
+      expect(result?.confidenceScore).toBeLessThan(75);
+    });
+
+    it('ambiguous path collisions like a/b/index.ts vs x/y/index.ts do NOT match', async () => {
+      const log = 'Error: Failure in a/b/index.ts:10:5';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const context = createMockContext(['x/y/index.ts']);
+      const detector = new CodeRegressionDetector();
+      const result = detector.detect({ context, parseResult });
+
+      expect(result).toBeNull();
+    });
+
+    it('handles Windows slashes, monorepo paths, and JS/TS extension cross-matching', async () => {
+      const log = 'Error: at validateUser (dist\\auth\\login.js:45:12)';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const context = createMockContext(['packages/core/src/auth/login.ts']);
+      const detector = new CodeRegressionDetector();
+      const result = detector.detect({ context, parseResult });
+
+      expect(result).not.toBeNull();
+      expect(result?.category).toBe('CODE_REGRESSION');
     });
   });
 

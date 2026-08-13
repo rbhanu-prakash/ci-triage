@@ -6,9 +6,10 @@ const SOCKET_NET_PATTERN =
   /\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|connection reset|connection refused|getaddrinfo ENOTFOUND|Could not resolve host|Name or service not known|FetchError|NetworkError|Failed to fetch)\b/i;
 
 const HTTP_NET_STATUS_PATTERN =
-  /\b(?:HTTP|status code)\s*(?:408|429|500|502|503|504)\b|\b(?:502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout|429 Too Many Requests)\b/i;
+  /\b(?:HTTP|status code|Status)\s*(?:408|429|500|502|503|504)\b|\b(?:502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout|429 Too Many Requests)\b/i;
 
-const TEST_ASSERTION_PATTERN = /\b(?:expect\(|AssertionError|toEqual|toBe\(|assert\b)/i;
+const TEST_ASSERTION_PATTERN =
+  /\b(?:expect\(|AssertionError|toEqual|toBe\(|assert\b|expected status|status_code ==)\b/i;
 
 export class NetworkDetector implements Detector {
   public readonly id = 'network';
@@ -22,17 +23,21 @@ export class NetworkDetector implements Detector {
 
     const evidence: EvidenceItem[] = [];
     let primaryRawError = '';
+    let hasTransportFailure = false;
 
     for (const frame of parseResult.frames) {
       const allLines = [frame.rawErrorLine, ...frame.linesBefore, ...frame.linesAfter].join('\n');
 
+      const isTestAssertion = TEST_ASSERTION_PATTERN.test(allLines);
       const socketMatch = SOCKET_NET_PATTERN.exec(allLines);
+
       if (socketMatch) {
+        hasTransportFailure = true;
         evidence.push(
           createEvidenceItem(
             `net_socket_${frame.id}`,
             'log_signature',
-            `Observed network error signature: "${socketMatch[0]}" in "${frame.rawErrorLine.slice(0, 150)}"`,
+            `Observed transport network error signature: "${socketMatch[0]}" in "${frame.rawErrorLine.slice(0, 150)}"`,
             95,
             frame.rawErrorLine,
           ),
@@ -42,15 +47,14 @@ export class NetworkDetector implements Detector {
 
       const httpMatch = HTTP_NET_STATUS_PATTERN.exec(allLines);
       if (httpMatch) {
-        // Conservative check: verify this isn't an application test runner asserting HTTP status
-        const isTestAssertion = TEST_ASSERTION_PATTERN.test(allLines);
+        // Filter out test runner assertions comparing HTTP status codes
         if (!isTestAssertion || socketMatch) {
           evidence.push(
             createEvidenceItem(
               `net_http_${frame.id}`,
               'log_signature',
-              `Observed HTTP network status error: "${httpMatch[0]}" in "${frame.rawErrorLine.slice(0, 150)}"`,
-              isTestAssertion ? 60 : 85,
+              `Observed HTTP network status response: "${httpMatch[0]}" in "${frame.rawErrorLine.slice(0, 150)}"`,
+              socketMatch ? 85 : 60,
               frame.rawErrorLine,
             ),
           );
@@ -63,9 +67,10 @@ export class NetworkDetector implements Detector {
       return null;
     }
 
-    // Filter out low-confidence evidence if stronger signatures exist
-    const topRelevance = Math.max(...evidence.map((e) => e.relevanceScore));
-    const confidenceScore = topRelevance >= 90 ? 95 : 80;
+    // Determine overall confidence based on evidence signals
+    // Strong transport failure (ECONNREFUSED, socket hang up) => high confidence (95)
+    // Generic HTTP status (500, 429, etc.) without transport failure => moderate/ambiguous (60)
+    const confidenceScore = hasTransportFailure ? 95 : 60;
 
     const fingerprint = generateFingerprint(
       primaryRawError || parseResult.frames[0].rawErrorLine,
