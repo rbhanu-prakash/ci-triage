@@ -34,6 +34,8 @@ steps:
 | `history-depth` | Number of past workflow runs to compare fingerprints against | `10` |
 | `comment-on-pr` | Post triage Markdown summary to Pull Request | `false` |
 | `unknown-threshold` | Minimum confidence % required for classification | `50` |
+| `min-flaky-confidence` | Minimum confidence % required for FLAKY_TEST | `75` |
+| `min-regression-confidence` | Minimum confidence % required for CODE_REGRESSION | `80` |
 
 ## Architecture
 

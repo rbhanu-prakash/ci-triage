@@ -13,3 +13,4 @@ export * from './parser/context-window.js';
 export * from './parser/stream-parser.js';
 export * from './detectors/index.js';
 export * from './reporter/index.js';
+export * from './github/index.js';
