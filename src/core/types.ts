@@ -80,6 +80,11 @@ export interface AnalysisContext {
   config: AnalysisConfig;
 }
 
+export interface EvidenceContributor {
+  category: FailureCategory;
+  detectorId: string;
+}
+
 export interface EvidenceItem {
   id: string;
   source: 'log_signature' | 'exit_code' | 'diff_correlation' | 'history_match' | 'system_event';
@@ -88,6 +93,7 @@ export interface EvidenceItem {
   relevanceScore: number; // 0 - 100
   detectorCategory?: FailureCategory;
   detectorId?: string;
+  contributingDetectors?: EvidenceContributor[];
 }
 
 export interface SecondarySignal {

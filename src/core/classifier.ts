@@ -97,11 +97,7 @@ export class Classifier {
     }
 
     // 6. Build Inference Details string
-    const inferenceDetails = this.buildInferenceDetails(
-      observedEvidence,
-      primary,
-      resolutionReason,
-    );
+    const inferenceDetails = this.buildInferenceDetails(primary, resolutionReason);
 
     // 7. Find primary fingerprint
     const primaryFingerprint =
@@ -155,46 +151,55 @@ export class Classifier {
     const regCand = findCategory('CODE_REGRESSION');
 
     // Conflict Rule A: Upstream BUILD vs Downstream TEST_FAILURE
-    if (buildCand && testCand && buildCand.confidenceScore >= 80) {
-      primary = buildCand;
-      resolutionReason =
-        'Selected BUILD as primary cause because compiler/build error precedes downstream test failure.';
+    if (buildCand && testCand) {
+      // BUILD overrides TEST_FAILURE only if BUILD score is competitive (within 10 points or higher)
+      if (
+        buildCand.confidenceScore >= testCand.confidenceScore - 10 &&
+        buildCand.confidenceScore >= 75
+      ) {
+        if (primary.category !== 'BUILD') {
+          primary = buildCand;
+          resolutionReason =
+            'Selected BUILD as primary cause because compiler/build error precedes downstream test failure.';
+        }
+      }
     }
     // Conflict Rule B: Systemic NETWORK overriding weaker CODE_REGRESSION or TEST_FAILURE
-    else if (
+    if (
       netCand &&
       netCand.confidenceScore >= 85 &&
       (primary.category === 'CODE_REGRESSION' || primary.category === 'TEST_FAILURE') &&
-      primary.confidenceScore < 80
+      primary.confidenceScore <= netCand.confidenceScore + 5
     ) {
       primary = netCand;
       resolutionReason = `Selected NETWORK as primary cause due to strong systemic infrastructure failure signature (${netCand.confidenceScore}) overriding code signal.`;
     }
-    // Conflict Rule C: FLAKY_TEST priority over generic TEST_FAILURE
-    else if (
+    // Conflict Rule C: FLAKY_TEST priority over generic TEST_FAILURE when supported by strong historical evidence
+    if (
       flakyCand &&
       flakyCand.confidenceScore >= config.minFlakyConfidence &&
-      primary.category === 'TEST_FAILURE'
+      primary.category === 'TEST_FAILURE' &&
+      flakyCand.confidenceScore >= (testCand?.confidenceScore || 0) - 10
     ) {
       primary = flakyCand;
       resolutionReason = `Selected FLAKY_TEST as primary cause due to historical non-deterministic pass/fail signature.`;
     }
     // Conflict Rule D: CODE_REGRESSION priority over generic TEST_FAILURE when confidence >= threshold
-    else if (
+    if (
       regCand &&
       regCand.confidenceScore >= config.minRegressionConfidence &&
-      primary.category === 'TEST_FAILURE'
+      primary.category === 'TEST_FAILURE' &&
+      regCand.confidenceScore >= (testCand?.confidenceScore || 0) - 5
     ) {
       primary = regCand;
       resolutionReason = `Selected CODE_REGRESSION as primary cause due to direct correlation between PR diff and failure location.`;
     }
     // Conflict Rule E: DEPENDENCY vs NETWORK conflict handling
-    else if (
-      depCand &&
-      netCand &&
-      Math.abs(depCand.confidenceScore - netCand.confidenceScore) <= 15
-    ) {
-      primary = depCand.confidenceScore >= netCand.confidenceScore ? depCand : netCand;
+    if (depCand && netCand && Math.abs(depCand.confidenceScore - netCand.confidenceScore) <= 15) {
+      const topChoice = depCand.confidenceScore >= netCand.confidenceScore ? depCand : netCand;
+      if (primary.category === 'DEPENDENCY' || primary.category === 'NETWORK') {
+        primary = topChoice;
+      }
       conflictPenalty = 15;
       resolutionReason = `Conflict detected between DEPENDENCY (${depCand.confidenceScore}) and NETWORK (${netCand.confidenceScore}) signals. Apply conflict penalty.`;
     }
@@ -241,26 +246,49 @@ export class Classifier {
   private calculateConfidenceScore(
     primary: DetectorResult,
     evidence: EvidenceItem[],
-    _candidates: DetectorResult[],
+    candidates: DetectorResult[],
     conflictPenalty: number,
   ): number {
     let score = primary.confidenceScore;
 
-    // Corroboration bonus: count evidence items supporting primary category
-    const primaryEvidence = evidence.filter((e) => e.detectorCategory === primary.category);
+    // 1. Primary Evidence Corroboration
+    const primaryEvidence = evidence.filter(
+      (e) =>
+        e.detectorCategory === primary.category ||
+        e.contributingDetectors?.some((c) => c.category === primary.category),
+    );
 
     if (primaryEvidence.length > 1) {
-      const bonus = Math.min(15, (primaryEvidence.length - 1) * 5);
+      const bonus = Math.min(10, (primaryEvidence.length - 1) * 5);
       score += bonus;
     }
 
-    // Diversity bonus: evidence spanning multiple distinct sources
+    // 2. Cross-Detector Corroboration:
+    // Check for evidence items corroborated by multiple distinct detectors
+    const multiDetectorEvidenceCount = primaryEvidence.filter(
+      (e) => (e.contributingDetectors?.length || 0) > 1,
+    ).length;
+    if (multiDetectorEvidenceCount > 0) {
+      score += Math.min(10, multiDetectorEvidenceCount * 5);
+    }
+
+    // Check for independent candidate detectors corroborating the primary category
+    const corroboratingCandidatesCount = candidates.filter(
+      (c) =>
+        c.category !== primary.category &&
+        (c.category === 'TEST_FAILURE' || c.category === 'BUILD' || c.category === 'DEPENDENCY'),
+    ).length;
+    if (corroboratingCandidatesCount > 0 && primary.confidenceScore >= 75) {
+      score += Math.min(5, corroboratingCandidatesCount * 5);
+    }
+
+    // 3. Source Diversity: evidence spanning multiple distinct sources
     const sources = new Set(primaryEvidence.map((e) => e.source));
     if (sources.size >= 2) {
       score += 5;
     }
 
-    // Apply conflict penalty
+    // 4. Apply conflict penalty
     score -= conflictPenalty;
 
     // Strict cap at 100, floor at 0
@@ -268,21 +296,14 @@ export class Classifier {
   }
 
   /**
-   * Constructs the formal inferenceDetails text clearly separating OBSERVED FACTS from CLASSIFIER INFERENCE.
+   * Constructs concise classifier inference text without duplicating observed evidence.
    */
-  private buildInferenceDetails(
-    evidence: EvidenceItem[],
-    primary: DetectorResult,
-    resolutionReason?: string,
-  ): string {
-    const facts = evidence.map((e) => `- ${e.description}`).join('\n');
-
+  private buildInferenceDetails(primary: DetectorResult, resolutionReason?: string): string {
     let inference = `The failure is most consistent with a ${primary.category.toLowerCase()} issue.`;
     if (resolutionReason) {
       inference += ` ${resolutionReason}`;
     }
-
-    return `OBSERVED FACTS:\n${facts || '- No specific log signatures extracted.'}\n\nCLASSIFIER INFERENCE:\n${inference}`;
+    return inference;
   }
 
   /**
@@ -297,8 +318,7 @@ export class Classifier {
     confidence = 0,
     secondarySignals: SecondarySignal[] = [],
   ): TriageReport {
-    const facts = observedEvidence.map((e) => `- ${e.description}`).join('\n');
-    const inferenceDetails = `OBSERVED FACTS:\n${facts || '- No specific log signatures extracted.'}\n\nCLASSIFIER INFERENCE:\nClassification is UNKNOWN. ${reason}`;
+    const inferenceDetails = `Classification is UNKNOWN. ${reason}`;
 
     return {
       classification: 'UNKNOWN',

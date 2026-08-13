@@ -41,26 +41,53 @@ describe('EvidenceEngine', () => {
     expect(aggregated[0].id).toBe('ev2');
   });
 
-  it('preserves provenance for detector category and ID', () => {
+  it('preserves multiple contributing detectors when merging duplicate evidence', () => {
     const engine = new EvidenceEngine();
 
-    const result: DetectorResult = {
-      category: 'NETWORK',
-      confidenceScore: 95,
+    const result1: DetectorResult = {
+      category: 'DEPENDENCY',
+      confidenceScore: 80,
       evidence: [
         {
-          id: 'net1',
+          id: 'ev1',
           source: 'log_signature',
-          description: 'Connection refused',
-          relevanceScore: 95,
+          description: 'Package resolution failed',
+          snippet: 'ERESOLVE unable to resolve',
+          relevanceScore: 70,
+          detectorCategory: 'DEPENDENCY',
+          detectorId: 'dependency_detector',
         },
       ],
     };
 
-    const aggregated = engine.aggregate([result]);
+    const result2: DetectorResult = {
+      category: 'NETWORK',
+      confidenceScore: 90,
+      evidence: [
+        {
+          id: 'ev2',
+          source: 'log_signature',
+          description: 'Package resolution failed',
+          snippet: 'ERESOLVE unable to resolve',
+          relevanceScore: 95,
+          detectorCategory: 'NETWORK',
+          detectorId: 'network_detector',
+        },
+      ],
+    };
 
-    expect(aggregated[0].detectorCategory).toBe('NETWORK');
-    expect(aggregated[0].detectorId).toBe('network_detector');
+    const aggregated = engine.aggregate([result1, result2]);
+
+    // Rendered once
+    expect(aggregated).toHaveLength(1);
+    // Highest relevance retained
+    expect(aggregated[0].relevanceScore).toBe(95);
+    expect(aggregated[0].id).toBe('ev2');
+    // All contributing detectors preserved
+    expect(aggregated[0].contributingDetectors).toEqual([
+      { category: 'DEPENDENCY', detectorId: 'dependency_detector' },
+      { category: 'NETWORK', detectorId: 'network_detector' },
+    ]);
   });
 
   it('groups evidence by source and category', () => {

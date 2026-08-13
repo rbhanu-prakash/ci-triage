@@ -1,21 +1,30 @@
-import { DetectorResult, EvidenceItem, FailureCategory } from './types.js';
+import { DetectorResult, EvidenceContributor, EvidenceItem, FailureCategory } from './types.js';
 
 export class EvidenceEngine {
   /**
    * Aggregates and deduplicates evidence items across all provided detector results without mutating inputs.
+   * Preserves all contributing detector identities for corroboration provenance.
    */
   public aggregate(results: DetectorResult[]): EvidenceItem[] {
     const aggregatedMap = new Map<string, EvidenceItem>();
 
     for (const result of results) {
+      const defaultCategory = result.category;
+      const defaultDetectorId = `${result.category.toLowerCase()}_detector`;
+
       for (const item of result.evidence) {
         // Create deduplication key based on normalized description and snippet
         const normDesc = item.description.trim().toLowerCase();
         const normSnippet = (item.snippet || '').trim().toLowerCase();
         const dedupKey = `${item.source}::${normDesc}::${normSnippet}`;
 
-        const provenanceCategory = item.detectorCategory || result.category;
-        const provenanceId = item.detectorId || `${result.category.toLowerCase()}_detector`;
+        const itemCategory = item.detectorCategory || defaultCategory;
+        const itemDetectorId = item.detectorId || defaultDetectorId;
+
+        const currentContributor: EvidenceContributor = {
+          category: itemCategory,
+          detectorId: itemDetectorId,
+        };
 
         const existing = aggregatedMap.get(dedupKey);
 
@@ -26,20 +35,36 @@ export class EvidenceEngine {
             description: item.description,
             snippet: item.snippet,
             relevanceScore: item.relevanceScore,
-            detectorCategory: provenanceCategory,
-            detectorId: provenanceId,
+            detectorCategory: itemCategory,
+            detectorId: itemDetectorId,
+            contributingDetectors: [currentContributor],
           });
         } else {
-          // Preserve the highest-relevance copy when duplicates occur
+          const existingContributors = existing.contributingDetectors || [];
+          const alreadyContributed = existingContributors.some(
+            (c) => c.category === itemCategory && c.detectorId === itemDetectorId,
+          );
+          const updatedContributors = alreadyContributed
+            ? existingContributors
+            : [...existingContributors, currentContributor];
+
           if (item.relevanceScore > existing.relevanceScore) {
+            // Retain higher-relevance copy while preserving all aggregated contributors
             aggregatedMap.set(dedupKey, {
               id: item.id,
               source: item.source,
               description: item.description,
               snippet: item.snippet,
               relevanceScore: item.relevanceScore,
-              detectorCategory: provenanceCategory,
-              detectorId: provenanceId,
+              detectorCategory: itemCategory,
+              detectorId: itemDetectorId,
+              contributingDetectors: updatedContributors,
+            });
+          } else {
+            // Keep existing copy content but update contributingDetectors array immutably
+            aggregatedMap.set(dedupKey, {
+              ...existing,
+              contributingDetectors: updatedContributors,
             });
           }
         }

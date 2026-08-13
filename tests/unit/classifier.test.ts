@@ -295,7 +295,7 @@ describe('Classifier (Phase 4)', () => {
     }
   });
 
-  it('10. cleanly separates OBSERVED FACTS from CLASSIFIER INFERENCE in inferenceDetails', () => {
+  it('10. cleanly presents classifier inference in inferenceDetails', () => {
     const results: DetectorResult[] = [
       {
         category: 'DEPENDENCY',
@@ -313,11 +313,6 @@ describe('Classifier (Phase 4)', () => {
 
     const report = classifier.classify(results);
 
-    expect(report.inferenceDetails).toContain('OBSERVED FACTS:');
-    expect(report.inferenceDetails).toContain(
-      '- npm reported ERESOLVE unable to resolve dependency tree',
-    );
-    expect(report.inferenceDetails).toContain('CLASSIFIER INFERENCE:');
     expect(report.inferenceDetails).toContain(
       'The failure is most consistent with a dependency issue.',
     );
@@ -501,5 +496,73 @@ describe('Classifier (Phase 4)', () => {
 
     expect(report.classification).toBe('BUILD');
     expect(report.secondarySignals?.some((s) => s.category === 'TEST_FAILURE')).toBe(true);
+  });
+
+  it('17. lower confidence BUILD 80 does not override much stronger TEST_FAILURE 99', () => {
+    const results: DetectorResult[] = [
+      {
+        category: 'BUILD',
+        confidenceScore: 80,
+        evidence: [
+          {
+            id: 'b1',
+            source: 'log_signature',
+            description: 'Possible warning/build issue',
+            relevanceScore: 80,
+          },
+        ],
+      },
+      {
+        category: 'TEST_FAILURE',
+        confidenceScore: 99,
+        evidence: [
+          {
+            id: 'tf1',
+            source: 'log_signature',
+            description: 'Explicit assertion error in auth test',
+            relevanceScore: 99,
+          },
+        ],
+      },
+    ];
+
+    const report = classifier.classify(results);
+
+    expect(report.classification).toBe('TEST_FAILURE');
+    expect(report.secondarySignals?.some((s) => s.category === 'BUILD')).toBe(true);
+  });
+
+  it('18. strong NETWORK 90 dominates CODE_REGRESSION 85 while preserving it as secondary signal', () => {
+    const results: DetectorResult[] = [
+      {
+        category: 'NETWORK',
+        confidenceScore: 90,
+        evidence: [
+          {
+            id: 'net1',
+            source: 'log_signature',
+            description: 'DNS lookup timeout for npmjs.org',
+            relevanceScore: 90,
+          },
+        ],
+      },
+      {
+        category: 'CODE_REGRESSION',
+        confidenceScore: 85,
+        evidence: [
+          {
+            id: 'cr1',
+            source: 'diff_correlation',
+            description: 'PR diff modified auth file',
+            relevanceScore: 85,
+          },
+        ],
+      },
+    ];
+
+    const report = classifier.classify(results);
+
+    expect(report.classification).toBe('NETWORK');
+    expect(report.secondarySignals?.some((s) => s.category === 'CODE_REGRESSION')).toBe(true);
   });
 });
