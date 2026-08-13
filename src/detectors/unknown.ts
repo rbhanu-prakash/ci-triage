@@ -36,7 +36,7 @@ export class UnknownDetector implements Detector {
       evidence,
       fingerprint,
       suggestedAction:
-        'Manually inspect full build log logs to identify unmapped error signatures or unknown failure modes.',
+        'Manually inspect the full build log to identify unmapped error signatures or unknown failure modes.',
     };
   }
 }

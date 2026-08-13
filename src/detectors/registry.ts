@@ -71,8 +71,9 @@ export class DetectorRegistry {
   }
 
   /**
-   * Runs all detectors against input evidence and selects the top confidence detector result.
-   * Note: Global classification, conflict resolution, and unknownThreshold application are deferred to Phase 4.
+   * @deprecated Deprecated in Phase 3. Single-result selection is deprecated.
+   * Phase 3 exposes detector signals via evaluateAll().
+   * Phase 4 will own conflict resolution, ranking/selection, confidence aggregation, and final classification.
    */
   public evaluate(input: DetectorInput): DetectorResult {
     const candidates = this.evaluateAll(input);
@@ -83,7 +84,9 @@ export class DetectorRegistry {
 const defaultRegistry = new DetectorRegistry();
 
 /**
- * Convenience function to evaluate failure detectors for a given analysis input and return the top match.
+ * @deprecated Deprecated in Phase 3. Single-result selection is deprecated.
+ * Phase 3 exposes detector signals via triageAllFailures().
+ * Phase 4 will own conflict resolution, ranking/selection, confidence aggregation, and final classification.
  */
 export function triageFailure(input: DetectorInput): DetectorResult {
   return defaultRegistry.evaluate(input);
