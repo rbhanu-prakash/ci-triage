@@ -2,6 +2,11 @@ import { Detector, DetectorInput, createEvidenceItem } from './base.js';
 import { DetectorResult, EvidenceItem, HistoricalRun } from '../core/types.js';
 import { generateFingerprint } from '../parser/fingerprint.js';
 
+interface ConfirmedTransition {
+  failureRun: HistoricalRun;
+  successRun: HistoricalRun;
+}
+
 export class FlakyTestDetector implements Detector {
   public readonly id = 'flaky_test';
   public readonly category = 'FLAKY_TEST';
@@ -18,8 +23,6 @@ export class FlakyTestDetector implements Detector {
 
     const evidence: EvidenceItem[] = [];
     let primaryRawError = '';
-    let historicalPasses = 0;
-    let historicalFailures = 0;
     const failureRuns: HistoricalRun[] = [];
     const successRuns: HistoricalRun[] = [];
 
@@ -36,12 +39,10 @@ export class FlakyTestDetector implements Detector {
 
         if (hasFingerprint) {
           if (run.conclusion === 'failure') {
-            historicalFailures++;
             if (!failureRuns.some((r) => r.runId === run.runId)) {
               failureRuns.push(run);
             }
           } else if (run.conclusion === 'success') {
-            historicalPasses++;
             if (!successRuns.some((r) => r.runId === run.runId)) {
               successRuns.push(run);
             }
@@ -53,44 +54,76 @@ export class FlakyTestDetector implements Detector {
       }
     }
 
-    // FLAKY_TEST safety rule: Must require multiple historical signals.
-    // Must have historical failure evidence AND historical success evidence for matching fingerprint/context.
-    if (historicalFailures === 0 || historicalPasses === 0) {
+    // Must have observed both failure evidence AND success evidence
+    if (failureRuns.length === 0 || successRuns.length === 0) {
       return null;
     }
 
-    // Build evidence items
-    for (const run of failureRuns) {
-      evidence.push(
-        createEvidenceItem(
-          `history_flaky_failure_${run.runId}`,
-          'history_match',
-          `Failure fingerprint "${fingerprintSlice(primaryRawError || parseResult.frames[0].rawErrorLine, context)}" was observed in failing historical run #${run.runId} (${run.createdAt}).`,
-          80,
-          primaryRawError || parseResult.frames[0].rawErrorLine,
-        ),
-      );
+    // Find confirmed comparable failure -> subsequent success transitions
+    const confirmedTransitions: ConfirmedTransition[] = [];
+
+    for (const failRun of failureRuns) {
+      for (const succRun of successRuns) {
+        // Scope / comparability check: must share same workflowId or same commitSha
+        const isSameWorkflow =
+          Boolean(failRun.workflowId) &&
+          Boolean(succRun.workflowId) &&
+          failRun.workflowId === succRun.workflowId;
+        const isSameCommit =
+          Boolean(failRun.commitSha) &&
+          Boolean(succRun.commitSha) &&
+          failRun.commitSha === succRun.commitSha;
+
+        if (!isSameWorkflow && !isSameCommit) {
+          continue; // Unrelated runs
+        }
+
+        // Sequential / ordering check: success run must occur strictly AFTER failure run
+        const failTime = Date.parse(failRun.createdAt);
+        const succTime = Date.parse(succRun.createdAt);
+
+        let isSubsequent = false;
+        if (!isNaN(failTime) && !isNaN(succTime)) {
+          if (succTime > failTime) {
+            isSubsequent = true;
+          }
+        } else if (typeof failRun.runId === 'number' && typeof succRun.runId === 'number') {
+          if (succRun.runId > failRun.runId) {
+            isSubsequent = true;
+          }
+        }
+
+        if (isSubsequent) {
+          confirmedTransitions.push({ failureRun: failRun, successRun: succRun });
+        }
+      }
     }
 
-    for (const run of successRuns) {
+    // If no confirmed comparable failure->success transitions are found, return null conservatively
+    if (confirmedTransitions.length === 0) {
+      return null;
+    }
+
+    // Build evidence items for confirmed transitions
+    for (const transition of confirmedTransitions) {
       evidence.push(
         createEvidenceItem(
-          `history_flaky_success_${run.runId}`,
+          `history_flaky_transition_${transition.failureRun.runId}_${transition.successRun.runId}`,
           'history_match',
-          `Failure fingerprint "${fingerprintSlice(primaryRawError || parseResult.frames[0].rawErrorLine, context)}" was present in successful historical run #${run.runId} (${run.createdAt}).`,
+          `Confirmed failure->subsequent success transition: run #${transition.failureRun.runId} failed and subsequent run #${transition.successRun.runId} succeeded for workflow "${transition.failureRun.workflowId || 'default'}".`,
           85,
           primaryRawError || parseResult.frames[0].rawErrorLine,
         ),
       );
     }
 
-    // Calculate confidence based on multiple independent flaky signals
-    let calculatedConfidence = 75; // Base confidence for 1 failure + 1 success match
-
-    if (historicalFailures >= 2 && historicalPasses >= 2) {
-      calculatedConfidence = 90;
-    } else if (historicalFailures >= 2 || historicalPasses >= 2) {
+    // Calculate confidence based on independent confirmed transitions
+    let calculatedConfidence = 75; // Base confidence for 1 confirmed failure->success transition
+    if (confirmedTransitions.length >= 2) {
       calculatedConfidence = 85;
+    }
+    if (confirmedTransitions.length >= 3) {
+      calculatedConfidence = 90;
     }
 
     const minFlakyConfidence = context.config.minFlakyConfidence ?? 75;
@@ -113,9 +146,4 @@ export class FlakyTestDetector implements Detector {
         'Investigate non-deterministic test behavior, race conditions, dynamic seed data, or timing sensitivities.',
     };
   }
-}
-
-function fingerprintSlice(rawErrorLine: string, context: DetectorInput['context']): string {
-  const fp = generateFingerprint(rawErrorLine, context.config.customSecretPatterns);
-  return fp.canonicalHash.slice(0, 8);
 }

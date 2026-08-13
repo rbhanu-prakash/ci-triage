@@ -71,20 +71,12 @@ export class DetectorRegistry {
   }
 
   /**
-   * Runs all detectors against input evidence and selects the highest confidence result.
+   * Runs all detectors against input evidence and selects the top confidence detector result.
+   * Note: Global classification, conflict resolution, and unknownThreshold application are deferred to Phase 4.
    */
   public evaluate(input: DetectorInput): DetectorResult {
     const candidates = this.evaluateAll(input);
-
-    const threshold = input.context.config.unknownThreshold ?? 50;
-    const topCandidate = candidates[0];
-
-    if (topCandidate && topCandidate.confidenceScore >= threshold) {
-      return topCandidate;
-    }
-
-    // Default to UNKNOWN fallback if max confidence is below unknownThreshold
-    return this.fallbackDetector.detect(input);
+    return candidates[0];
   }
 }
 

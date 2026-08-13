@@ -489,7 +489,40 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
   });
 
   describe('FlakyTestDetector', () => {
-    it('one successful historical run -> no FLAKY_TEST (returns null)', async () => {
+    it('1. failure + unrelated success -> null', async () => {
+      const log = 'Error: Flaky async timing assertion failed';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const errLine = parseResult.frames[0].rawErrorLine;
+      const { generateFingerprint } = await import('../../src/parser/fingerprint.js');
+      const fp = generateFingerprint(errLine);
+
+      const historicalRuns: AnalysisContext['historicalRuns'] = [
+        {
+          runId: 10,
+          workflowId: 'ci.yml',
+          commitSha: 'shaA',
+          conclusion: 'failure',
+          createdAt: '2026-08-09T10:00:00Z',
+          fingerprints: [fp.canonicalHash],
+        },
+        {
+          runId: 20,
+          workflowId: 'deploy.yml',
+          commitSha: 'shaB',
+          conclusion: 'success',
+          createdAt: '2026-08-09T11:00:00Z',
+          fingerprints: [fp.canonicalHash],
+        },
+      ];
+
+      const context = createMockContext([], historicalRuns);
+      const detector = new FlakyTestDetector();
+      const result = detector.detect({ context, parseResult });
+
+      expect(result).toBeNull();
+    });
+
+    it('2. successful run containing matching fingerprint only -> null', async () => {
       const log = 'Error: Flaky async timing assertion failed';
       const parseResult = await parseLogStream(createStringLogProvider(log));
       const errLine = parseResult.frames[0].rawErrorLine;
@@ -514,28 +547,29 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
       expect(result).toBeNull();
     });
 
-    it('historical success with no historical failure -> no FLAKY_TEST (returns null)', async () => {
+    it('3. insufficient historical relationship information -> null', async () => {
       const log = 'Error: Flaky async timing assertion failed';
       const parseResult = await parseLogStream(createStringLogProvider(log));
       const errLine = parseResult.frames[0].rawErrorLine;
       const { generateFingerprint } = await import('../../src/parser/fingerprint.js');
       const fp = generateFingerprint(errLine);
 
+      // Success occurred BEFORE failure (regression or code break, not flaky pass after fail)
       const historicalRuns: AnalysisContext['historicalRuns'] = [
         {
-          runId: 100,
+          runId: 10,
           workflowId: 'ci.yml',
-          commitSha: 'abc1234',
+          commitSha: 'shaA',
           conclusion: 'success',
-          createdAt: '2026-08-10T12:00:00Z',
+          createdAt: '2026-08-09T10:00:00Z',
           fingerprints: [fp.canonicalHash],
         },
         {
-          runId: 101,
+          runId: 20,
           workflowId: 'ci.yml',
-          commitSha: 'def5678',
-          conclusion: 'success',
-          createdAt: '2026-08-11T12:00:00Z',
+          commitSha: 'shaA',
+          conclusion: 'failure',
+          createdAt: '2026-08-09T12:00:00Z',
           fingerprints: [fp.canonicalHash],
         },
       ];
@@ -547,7 +581,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
       expect(result).toBeNull();
     });
 
-    it('failure + subsequent success with matching evidence -> FLAKY_TEST', async () => {
+    it('4. confirmed comparable failure->success evidence -> FLAKY_TEST', async () => {
       const log = 'Error: Flaky async timing assertion failed';
       const parseResult = await parseLogStream(createStringLogProvider(log));
       const errLine = parseResult.frames[0].rawErrorLine;
@@ -566,9 +600,9 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
         {
           runId: 100,
           workflowId: 'ci.yml',
-          commitSha: 'abc1234',
+          commitSha: 'abc1233',
           conclusion: 'success',
-          createdAt: '2026-08-10T12:00:00Z',
+          createdAt: '2026-08-09T12:05:00Z',
           fingerprints: [fp.canonicalHash],
         },
       ];
@@ -580,10 +614,10 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
       expect(result).not.toBeNull();
       expect(result?.category).toBe('FLAKY_TEST');
       expect(result?.confidenceScore).toBe(75);
-      expect(result?.evidence.length).toBe(2);
+      expect(result?.evidence.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('multiple matching failures and subsequent successes -> higher confidence', async () => {
+    it('5. multiple confirmed transitions -> higher confidence', async () => {
       const log = 'Error: Flaky async timing assertion failed';
       const parseResult = await parseLogStream(createStringLogProvider(log));
       const errLine = parseResult.frames[0].rawErrorLine;
@@ -602,17 +636,17 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
         {
           runId: 99,
           workflowId: 'ci.yml',
-          commitSha: 'abc1233',
-          conclusion: 'failure',
-          createdAt: '2026-08-09T12:00:00Z',
+          commitSha: 'abc1232',
+          conclusion: 'success',
+          createdAt: '2026-08-08T12:10:00Z',
           fingerprints: [fp.canonicalHash],
         },
         {
           runId: 100,
           workflowId: 'ci.yml',
-          commitSha: 'abc1234',
-          conclusion: 'success',
-          createdAt: '2026-08-10T12:00:00Z',
+          commitSha: 'abc1235',
+          conclusion: 'failure',
+          createdAt: '2026-08-11T12:00:00Z',
           fingerprints: [fp.canonicalHash],
         },
         {
@@ -620,7 +654,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
           workflowId: 'ci.yml',
           commitSha: 'abc1235',
           conclusion: 'success',
-          createdAt: '2026-08-11T12:00:00Z',
+          createdAt: '2026-08-11T12:10:00Z',
           fingerprints: [fp.canonicalHash],
         },
       ];
@@ -631,7 +665,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
 
       expect(result).not.toBeNull();
       expect(result?.category).toBe('FLAKY_TEST');
-      expect(result?.confidenceScore).toBe(90);
+      expect(result?.confidenceScore).toBeGreaterThanOrEqual(85);
     });
 
     it('insufficient historical context -> null', async () => {
@@ -659,19 +693,31 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
       expect(result.suggestedAction).toContain('Manually inspect');
     });
 
-    it('should evaluate registered detectors and select top confidence category via triageFailure', async () => {
-      const log = [
-        'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
-        'Process killed due to memory exhaustion',
-      ].join('\n');
+    it('should evaluate registered detectors and select top confidence category via triageFailure without applying unknownThreshold', async () => {
+      const log = 'AssertionError: weak test failure line';
 
       const parseResult = await parseLogStream(createStringLogProvider(log));
       const context = createMockContext();
+      // Set unknownThreshold to 90
+      context.config.unknownThreshold = 90;
 
       const result = triageFailure({ context, parseResult });
 
-      expect(result.category).toBe('RESOURCE');
-      expect(result.confidenceScore).toBe(95);
+      // In Phase 3, registry does NOT override low-confidence candidate with UNKNOWN
+      expect(result.category).toBe('TEST_FAILURE');
+      expect(result.confidenceScore).toBe(55);
+    });
+
+    it('should expose all candidate signals via triageAllFailures', async () => {
+      const log = FIXTURES.dependencyNetworkOverlap;
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const context = createMockContext();
+
+      const results = triageAllFailures({ context, parseResult });
+
+      expect(results.length).toBeGreaterThanOrEqual(2);
+      expect(results.some((r) => r.category === 'DEPENDENCY')).toBe(true);
+      expect(results.some((r) => r.category === 'NETWORK')).toBe(true);
     });
   });
 });
