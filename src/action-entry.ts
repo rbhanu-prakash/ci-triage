@@ -51,7 +51,9 @@ export async function runActionOrchestrator(deps: ActionOrchestrationDeps = {}):
     const client = deps.client || new OctokitClient(token);
 
     // 4. Build AnalysisContext (fetches failed job metadata, logs, changed files, historical runs)
-    const analysisContext = await buildAnalysisContext(eventContext, config, client);
+    const analysisContext = await buildAnalysisContext(eventContext, config, client, {
+      warningLogger,
+    });
 
     // 5. Parse logs using Phase 2 parseLogStream
     const parseResult = await parseLogStream(analysisContext.logProvider, analysisContext.config);
@@ -115,7 +117,10 @@ export async function runActionOrchestrator(deps: ActionOrchestrationDeps = {}):
 }
 
 async function run(): Promise<void> {
-  await runActionOrchestrator();
+  // Only execute automatically when run as the direct action entrypoint in Node
+  if (process.env.GITHUB_ACTIONS) {
+    await runActionOrchestrator();
+  }
 }
 
 void run();

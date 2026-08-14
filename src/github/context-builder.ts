@@ -8,11 +8,17 @@ import { createStringLogProvider } from '../core/log-provider.js';
 import { EventContext } from './event-context.js';
 import { GitHubClient } from './octokit-client.js';
 
+export interface ContextBuilderOptions {
+  warningLogger?: (message: string) => void;
+}
+
 export async function buildAnalysisContext(
   eventContext: EventContext,
   config: AnalysisConfig,
   client: GitHubClient,
+  options: ContextBuilderOptions = {},
 ): Promise<AnalysisContext> {
+  const warningLogger = options.warningLogger || (() => {});
   let jobName = eventContext.jobName || 'unknown-job';
   let stepName = 'unknown-step';
   let logProvider: LogStreamProvider = createStringLogProvider('');
@@ -35,12 +41,17 @@ export async function buildAnalysisContext(
             eventContext.repo,
             failedJob.jobId,
           );
-        } catch {
+        } catch (logErr) {
+          const msg = logErr instanceof Error ? logErr.message : String(logErr);
+          warningLogger(`Failed to fetch log stream for job ${failedJob.jobId}: ${msg}`);
           logProvider = createStringLogProvider('');
         }
+      } else {
+        warningLogger(`No eligible failed job could be identified for run ${eventContext.runId}.`);
       }
-    } catch {
-      // Ignore API failure for job resolution; fallbacks remain in place
+    } catch (jobErr) {
+      const msg = jobErr instanceof Error ? jobErr.message : String(jobErr);
+      warningLogger(`Failed to resolve failed job for run ${eventContext.runId}: ${msg}`);
     }
   }
 
@@ -52,7 +63,11 @@ export async function buildAnalysisContext(
         eventContext.repo,
         eventContext.pullNumber,
       );
-    } catch {
+    } catch (fileErr) {
+      const msg = fileErr instanceof Error ? fileErr.message : String(fileErr);
+      warningLogger(
+        `Failed to retrieve changed files for PR #${eventContext.pullNumber} (${msg}); CODE_REGRESSION evidence degraded.`,
+      );
       changedFiles = [];
     }
   }
@@ -67,7 +82,11 @@ export async function buildAnalysisContext(
         eventContext.runId,
         config.historyDepth,
       );
-    } catch {
+    } catch (histErr) {
+      const msg = histErr instanceof Error ? histErr.message : String(histErr);
+      warningLogger(
+        `Failed to retrieve historical runs for workflow "${eventContext.workflowName}" (${msg}); FLAKY_TEST evidence degraded.`,
+      );
       historicalRuns = [];
     }
   }

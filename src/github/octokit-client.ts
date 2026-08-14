@@ -1,11 +1,14 @@
 import * as github from '@actions/github';
 import { HistoricalRun, LogStreamProvider } from '../core/types.js';
-import { createStringLogProvider } from '../core/log-provider.js';
+import { GitHubLogStreamProvider } from './log-stream.js';
+import { parseLogStream } from '../parser/stream-parser.js';
+import { DEFAULT_ANALYSIS_CONFIG } from '../core/classifier.js';
 
 export interface FailedJobDetails {
   jobId: number;
   jobName: string;
   stepName: string;
+  conclusion: 'failure' | 'timed_out' | 'cancelled' | string;
 }
 
 export interface GitHubClient {
@@ -29,11 +32,21 @@ export interface GitHubClient {
 
 export class OctokitClient implements GitHubClient {
   private octokit: ReturnType<typeof github.getOctokit>;
+  private token: string;
 
   constructor(token: string) {
+    this.token = token;
     this.octokit = github.getOctokit(token);
   }
 
+  /**
+   * Deterministically selects the job whose failure should be analyzed.
+   * Priority:
+   * 1. Explicitly preferred job (if failed or timed_out)
+   * 2. Failed job (conclusion === 'failure', sorted deterministically by start time/id)
+   * 3. Timed out job (conclusion === 'timed_out')
+   * 4. Cancelled job (conclusion === 'cancelled')
+   */
   async getFailedJob(
     owner: string,
     repo: string,
@@ -49,76 +62,151 @@ export class OctokitClient implements GitHubClient {
       });
 
       const jobs = response.data.jobs || [];
-      const failedJobs = jobs.filter(
-        (j) =>
-          j.conclusion === 'failure' ||
-          j.conclusion === 'timed_out' ||
-          j.conclusion === 'cancelled' ||
-          (j.status === 'completed' &&
-            j.conclusion &&
-            j.conclusion !== 'success' &&
-            j.conclusion !== 'skipped'),
-      );
-
-      if (failedJobs.length === 0) {
+      if (jobs.length === 0) {
         return null;
       }
 
-      const selectedJob =
-        (preferredJobName ? failedJobs.find((j) => j.name === preferredJobName) : undefined) ||
-        failedJobs[0];
-
-      let failedStepName = 'Unknown Step';
-      if (selectedJob.steps) {
-        const failedStep = selectedJob.steps.find(
-          (s) =>
-            s.conclusion === 'failure' ||
-            s.conclusion === 'timed_out' ||
-            s.conclusion === 'cancelled',
-        );
-        if (failedStep) {
-          failedStepName = failedStep.name;
+      // Check preferred job first
+      if (preferredJobName) {
+        const preferred = jobs.find((j) => j.name === preferredJobName);
+        if (
+          preferred &&
+          (preferred.conclusion === 'failure' ||
+            preferred.conclusion === 'timed_out' ||
+            preferred.conclusion === 'cancelled')
+        ) {
+          return this.formatJobDetails(preferred);
         }
       }
 
-      return {
-        jobId: selectedJob.id,
-        jobName: selectedJob.name,
-        stepName: failedStepName,
-      };
+      // 1. Explicit 'failure' jobs (sorted deterministically by started_at ascending, then id ascending)
+      const failedJobs = jobs
+        .filter((j) => j.conclusion === 'failure')
+        .sort((a, b) => {
+          const timeA = a.started_at ? new Date(a.started_at).getTime() : 0;
+          const timeB = b.started_at ? new Date(b.started_at).getTime() : 0;
+          return timeA !== timeB ? timeA - timeB : a.id - b.id;
+        });
+
+      if (failedJobs.length > 0) {
+        return this.formatJobDetails(failedJobs[0]);
+      }
+
+      // 2. Explicit 'timed_out' jobs
+      const timedOutJobs = jobs
+        .filter((j) => j.conclusion === 'timed_out')
+        .sort((a, b) => a.id - b.id);
+
+      if (timedOutJobs.length > 0) {
+        return this.formatJobDetails(timedOutJobs[0]);
+      }
+
+      // 3. Explicit 'cancelled' jobs
+      const cancelledJobs = jobs
+        .filter((j) => j.conclusion === 'cancelled')
+        .sort((a, b) => a.id - b.id);
+
+      if (cancelledJobs.length > 0) {
+        return this.formatJobDetails(cancelledJobs[0]);
+      }
+
+      // 4. Other completed non-successful jobs
+      const otherUnsuccessful = jobs
+        .filter(
+          (j) =>
+            j.status === 'completed' &&
+            j.conclusion &&
+            j.conclusion !== 'success' &&
+            j.conclusion !== 'skipped',
+        )
+        .sort((a, b) => a.id - b.id);
+
+      if (otherUnsuccessful.length > 0) {
+        return this.formatJobDetails(otherUnsuccessful[0]);
+      }
+
+      return null;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`GitHub API failure listing jobs for run ${runId}: ${msg}`);
     }
   }
 
+  private formatJobDetails(job: {
+    id: number;
+    name: string;
+    conclusion: string | null;
+    steps?: Array<{ name: string; conclusion: string | null }>;
+  }): FailedJobDetails {
+    let failedStepName = 'Unknown Step';
+    if (job.steps && job.steps.length > 0) {
+      const failedStep = job.steps.find(
+        (s) =>
+          s.conclusion === 'failure' ||
+          s.conclusion === 'timed_out' ||
+          s.conclusion === 'cancelled',
+      );
+      if (failedStep) {
+        failedStepName = failedStep.name;
+      }
+    }
+
+    return {
+      jobId: job.id,
+      jobName: job.name,
+      stepName: failedStepName,
+      conclusion: job.conclusion || 'failure',
+    };
+  }
+
+  /**
+   * Fetches the job log stream without buffering the entire log into memory.
+   */
   async getJobLogStream(owner: string, repo: string, jobId: number): Promise<LogStreamProvider> {
-    try {
-      const response = await this.octokit.rest.actions.downloadJobLogsForWorkflowRun({
-        owner,
-        repo,
-        job_id: jobId,
+    const url = `https://api.github.com/repos/${owner}/${repo}/actions/jobs/${jobId}/logs`;
+
+    // Estimate size or verify availability before streaming
+    let estimatedSize: number | undefined;
+
+    const streamFactory = async function* (token: string): AsyncIterable<Uint8Array> {
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github.v3+json',
+          'User-Agent': 'CI-Triage-Action',
+        },
+        redirect: 'follow',
       });
 
-      let content = '';
-      if (typeof response.data === 'string') {
-        content = response.data;
-      } else if (response.data instanceof ArrayBuffer) {
-        content = Buffer.from(response.data).toString('utf-8');
-      } else if (Buffer.isBuffer(response.data)) {
-        content = response.data.toString('utf-8');
-      } else if (
-        response.data &&
-        typeof (response.data as { toString(): string }).toString === 'function'
-      ) {
-        content = (response.data as { toString(): string }).toString();
+      if (!response.ok) {
+        throw new Error(
+          `GitHub API failure fetching logs for job ${jobId}: HTTP ${response.status} ${response.statusText}`,
+        );
       }
 
-      return createStringLogProvider(content);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`GitHub API failure fetching logs for job ${jobId}: ${msg}`);
-    }
+      const contentLength = response.headers.get('content-length');
+      if (contentLength) {
+        const parsed = parseInt(contentLength, 10);
+        if (!isNaN(parsed)) estimatedSize = parsed;
+      }
+
+      if (!response.body) {
+        return;
+      }
+
+      const reader = response.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) yield value;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    };
+
+    return new GitHubLogStreamProvider(() => streamFactory(this.token), estimatedSize);
   }
 
   async getChangedFiles(owner: string, repo: string, pullNumber: number): Promise<string[]> {
@@ -140,38 +228,97 @@ export class OctokitClient implements GitHubClient {
     }
   }
 
+  /**
+   * Retrieves historical runs for the SAME workflow and extracts failure fingerprints.
+   */
   async getHistoricalRuns(
     owner: string,
     repo: string,
-    _workflowNameOrId: string,
+    workflowNameOrId: string,
     currentRunId: number,
     depth: number,
   ): Promise<HistoricalRun[]> {
     if (depth <= 0) return [];
-    try {
-      const response = await this.octokit.rest.actions.listWorkflowRunsForRepo({
-        owner,
-        repo,
-        per_page: Math.min(depth + 10, 100),
-      });
 
-      const runs = response.data.workflow_runs || [];
-      return runs
-        .filter((r) => r.id !== currentRunId)
-        .slice(0, depth)
-        .map((r) => ({
-          runId: r.id,
-          workflowId: String(r.workflow_id),
-          commitSha: r.head_sha || '',
-          conclusion:
-            r.conclusion === 'success'
-              ? 'success'
-              : r.conclusion === 'cancelled'
-                ? 'cancelled'
-                : 'failure',
-          createdAt: r.created_at || new Date().toISOString(),
-          fingerprints: [],
-        }));
+    try {
+      // First attempt querying workflow runs specifically for this workflow
+      let rawRuns: Array<{
+        id: number;
+        workflow_id: number;
+        head_sha: string;
+        conclusion: string | null;
+        created_at: string;
+      }> = [];
+
+      try {
+        const response = await this.octokit.rest.actions.listWorkflowRuns({
+          owner,
+          repo,
+          workflow_id: workflowNameOrId,
+          per_page: Math.min(depth + 10, 100),
+        });
+        rawRuns = response.data.workflow_runs;
+      } catch {
+        // Fallback: list workflow runs for repo and filter by workflow name/ID
+        const response = await this.octokit.rest.actions.listWorkflowRunsForRepo({
+          owner,
+          repo,
+          per_page: Math.min(depth + 15, 100),
+        });
+        rawRuns = (response.data.workflow_runs || []).filter(
+          (r) =>
+            r.name === workflowNameOrId ||
+            String(r.workflow_id) === workflowNameOrId ||
+            r.path?.includes(workflowNameOrId),
+        );
+      }
+
+      // Filter out current run, enforce valid timestamps, and slice to requested depth
+      const selectedRuns = rawRuns
+        .filter((r) => r.id !== currentRunId && r.created_at)
+        .slice(0, depth);
+
+      const historicalRuns: HistoricalRun[] = [];
+
+      for (const run of selectedRuns) {
+        const conclusion: 'success' | 'failure' | 'cancelled' =
+          run.conclusion === 'success'
+            ? 'success'
+            : run.conclusion === 'cancelled'
+              ? 'cancelled'
+              : 'failure';
+
+        let fingerprints: string[] = [];
+
+        // For failed runs, attempt bounded extraction of canonical error fingerprints
+        if (conclusion === 'failure') {
+          try {
+            const failedJob = await this.getFailedJob(owner, repo, run.id);
+            if (failedJob) {
+              const logProvider = await this.getJobLogStream(owner, repo, failedJob.jobId);
+              const parseResult = await parseLogStream(logProvider, {
+                ...DEFAULT_ANALYSIS_CONFIG,
+                maxLogSizeBytes: 2 * 1024 * 1024, // Bounded 2MB limit for historical logs
+              });
+              fingerprints = parseResult.frames.map((f) => f.fingerprint.canonicalHash);
+            }
+          } catch {
+            // Degraded historical run log parsing; continue without failing the primary analysis
+            fingerprints = [];
+          }
+        }
+
+        historicalRuns.push({
+          runId: run.id,
+          workflowId: String(run.workflow_id),
+          commitSha: run.head_sha || '',
+          conclusion,
+          createdAt: run.created_at,
+          fingerprints,
+        });
+      }
+
+      return historicalRuns;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`GitHub API failure fetching historical runs: ${msg}`);
