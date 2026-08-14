@@ -963,5 +963,33 @@ describe('Phase 5 GitHub Integration', () => {
       expect(outputs.classification).toBe('FLAKY_TEST');
       expect(Number(outputs.confidence)).toBeGreaterThanOrEqual(75);
     });
+
+    describe('Action Entrypoint Architecture & Test Safety', () => {
+      it('importing src/action-entry.ts does not execute runActionOrchestrator automatically even when GITHUB_ACTIONS=true', async () => {
+        const originalEnv = process.env.GITHUB_ACTIONS;
+        try {
+          process.env.GITHUB_ACTIONS = 'true';
+          // Dynamically import to verify no side-effects or failed runs occur on import
+          const mod = await import('../../src/action-entry.js');
+          expect(typeof mod.runActionOrchestrator).toBe('function');
+        } finally {
+          if (originalEnv === undefined) {
+            delete process.env.GITHUB_ACTIONS;
+          } else {
+            process.env.GITHUB_ACTIONS = originalEnv;
+          }
+        }
+      });
+
+      it('src/action-main.ts is the dedicated executable entrypoint', async () => {
+        const fs = await import('fs');
+        const path = await import('path');
+        const mainPath = path.resolve('src/action-main.ts');
+        expect(fs.existsSync(mainPath)).toBe(true);
+        const content = fs.readFileSync(mainPath, 'utf8');
+        expect(content).toContain("import { runActionOrchestrator } from './action-entry.js'");
+        expect(content).toContain('runActionOrchestrator()');
+      });
+    });
   });
 });

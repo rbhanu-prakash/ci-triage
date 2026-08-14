@@ -115,12 +115,3 @@ export async function runActionOrchestrator(deps: ActionOrchestrationDeps = {}):
     core.setFailed(`CI Triage Action failed: ${errorMessage}`);
   }
 }
-
-async function run(): Promise<void> {
-  // Only execute automatically when run as the direct action entrypoint in Node
-  if (process.env.GITHUB_ACTIONS) {
-    await runActionOrchestrator();
-  }
-}
-
-void run();
