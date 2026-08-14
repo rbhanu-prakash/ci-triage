@@ -23,8 +23,7 @@ export class FlakyTestDetector implements Detector {
 
     const evidence: EvidenceItem[] = [];
     let primaryRawError = '';
-    const failureRuns: HistoricalRun[] = [];
-    const successRuns: HistoricalRun[] = [];
+    const failureRunsWithMatchingFingerprint: HistoricalRun[] = [];
 
     for (const frame of parseResult.frames) {
       const fingerprint = generateFingerprint(
@@ -33,19 +32,11 @@ export class FlakyTestDetector implements Detector {
         frame.fingerprint.fileLocation,
       );
 
-      // Search across historical runs for matching fingerprint evidence
+      // Search across historical failed runs for matching failure fingerprint
       for (const run of context.historicalRuns) {
-        const hasFingerprint = run.fingerprints.includes(fingerprint.canonicalHash);
-
-        if (hasFingerprint) {
-          if (run.conclusion === 'failure') {
-            if (!failureRuns.some((r) => r.runId === run.runId)) {
-              failureRuns.push(run);
-            }
-          } else if (run.conclusion === 'success') {
-            if (!successRuns.some((r) => r.runId === run.runId)) {
-              successRuns.push(run);
-            }
+        if (run.conclusion === 'failure' && run.fingerprints.includes(fingerprint.canonicalHash)) {
+          if (!failureRunsWithMatchingFingerprint.some((r) => r.runId === run.runId)) {
+            failureRunsWithMatchingFingerprint.push(run);
           }
           if (!primaryRawError) {
             primaryRawError = frame.rawErrorLine;
@@ -54,17 +45,22 @@ export class FlakyTestDetector implements Detector {
       }
     }
 
-    // Must have observed both failure evidence AND success evidence
-    if (failureRuns.length === 0 || successRuns.length === 0) {
+    // Must have observed historical failure runs with the matching failure fingerprint
+    if (failureRunsWithMatchingFingerprint.length === 0) {
       return null;
     }
 
     // Find confirmed comparable failure -> subsequent success transitions
+    // A subsequent success run is a successful run of the SAME workflow (or same commit/branch) occurring after the failure run
     const confirmedTransitions: ConfirmedTransition[] = [];
 
-    for (const failRun of failureRuns) {
-      for (const succRun of successRuns) {
-        // Scope / comparability check: must share same workflowId or same commitSha
+    for (const failRun of failureRunsWithMatchingFingerprint) {
+      for (const succRun of context.historicalRuns) {
+        if (succRun.conclusion !== 'success') {
+          continue;
+        }
+
+        // Comparability check: must share same workflow identifier or same commit
         const isSameWorkflow =
           Boolean(failRun.workflowId) &&
           Boolean(succRun.workflowId) &&
@@ -110,7 +106,7 @@ export class FlakyTestDetector implements Detector {
         createEvidenceItem(
           `history_flaky_transition_${transition.failureRun.runId}_${transition.successRun.runId}`,
           'history_match',
-          `Confirmed failure->subsequent success transition: run #${transition.failureRun.runId} failed and subsequent run #${transition.successRun.runId} succeeded for workflow "${transition.failureRun.workflowId || 'default'}".`,
+          `Confirmed failure->subsequent success transition: run #${transition.failureRun.runId} failed with matching error fingerprint and subsequent run #${transition.successRun.runId} succeeded for workflow "${transition.failureRun.workflowId || 'default'}".`,
           85,
           primaryRawError || parseResult.frames[0].rawErrorLine,
         ),

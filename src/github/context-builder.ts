@@ -4,9 +4,8 @@ import {
   HistoricalRun,
   LogStreamProvider,
 } from '../core/types.js';
-import { createStringLogProvider } from '../core/log-provider.js';
 import { EventContext } from './event-context.js';
-import { GitHubClient } from './octokit-client.js';
+import { GitHubClient, HistoricalRunsQuery } from './octokit-client.js';
 
 export interface ContextBuilderOptions {
   warningLogger?: (message: string) => void;
@@ -19,44 +18,54 @@ export async function buildAnalysisContext(
   options: ContextBuilderOptions = {},
 ): Promise<AnalysisContext> {
   const warningLogger = options.warningLogger || (() => {});
-  let jobName = eventContext.jobName || 'unknown-job';
-  let stepName = 'unknown-step';
-  let logProvider: LogStreamProvider = createStringLogProvider('');
 
-  if (eventContext.owner && eventContext.repo && eventContext.runId) {
-    try {
-      const failedJob = await client.getFailedJob(
-        eventContext.owner,
-        eventContext.repo,
-        eventContext.runId,
-        eventContext.jobName,
-      );
-
-      if (failedJob) {
-        jobName = failedJob.jobName;
-        stepName = failedJob.stepName;
-        try {
-          logProvider = await client.getJobLogStream(
-            eventContext.owner,
-            eventContext.repo,
-            failedJob.jobId,
-          );
-        } catch (logErr) {
-          const msg = logErr instanceof Error ? logErr.message : String(logErr);
-          warningLogger(`Failed to fetch log stream for job ${failedJob.jobId}: ${msg}`);
-          logProvider = createStringLogProvider('');
-        }
-      } else {
-        warningLogger(`No eligible failed job could be identified for run ${eventContext.runId}.`);
-      }
-    } catch (jobErr) {
-      const msg = jobErr instanceof Error ? jobErr.message : String(jobErr);
-      warningLogger(`Failed to resolve failed job for run ${eventContext.runId}: ${msg}`);
-    }
+  if (!eventContext.owner || !eventContext.repo || !eventContext.runId) {
+    throw new Error(
+      `Insufficient repository or run context for CI Triage: owner="${eventContext.owner}", repo="${eventContext.repo}", runId=${eventContext.runId}.`,
+    );
   }
 
+  // 1. Identify the failed job to analyze (REQUIRED)
+  let failedJob;
+  try {
+    failedJob = await client.getFailedJob(
+      eventContext.owner,
+      eventContext.repo,
+      eventContext.runId,
+      eventContext.jobName,
+    );
+  } catch (jobErr) {
+    const msg = jobErr instanceof Error ? jobErr.message : String(jobErr);
+    throw new Error(`Failed to list workflow jobs for run ${eventContext.runId}: ${msg}`);
+  }
+
+  if (!failedJob) {
+    throw new Error(
+      `No eligible failed, timed out, or unsuccessful job was found for run ${eventContext.runId} to analyze.`,
+    );
+  }
+
+  const jobName = failedJob.jobName;
+  const stepName = failedJob.stepName;
+
+  // 2. Fetch the failure log stream (REQUIRED - must not silently degrade to empty string)
+  let logProvider: LogStreamProvider;
+  try {
+    logProvider = await client.getJobLogStream(
+      eventContext.owner,
+      eventContext.repo,
+      failedJob.jobId,
+    );
+  } catch (logErr) {
+    const msg = logErr instanceof Error ? logErr.message : String(logErr);
+    throw new Error(
+      `Failed to retrieve job log stream for failed job "${jobName}" (job ID: ${failedJob.jobId}): ${msg}`,
+    );
+  }
+
+  // 3. Optional Changed Files evidence (gracefully degrades with warning)
   let changedFiles: string[] = [];
-  if (eventContext.owner && eventContext.repo && eventContext.pullNumber) {
+  if (eventContext.pullNumber) {
     try {
       changedFiles = await client.getChangedFiles(
         eventContext.owner,
@@ -72,13 +81,20 @@ export async function buildAnalysisContext(
     }
   }
 
+  // 4. Optional Historical Runs evidence (gracefully degrades with warning)
   let historicalRuns: HistoricalRun[] = [];
-  if (eventContext.owner && eventContext.repo && eventContext.runId && config.historyDepth > 0) {
+  if (config.historyDepth > 0) {
+    const workflowQuery: HistoricalRunsQuery = {
+      workflowId: eventContext.workflowId,
+      workflowPath: eventContext.workflowPath,
+      workflowName: eventContext.workflowName,
+    };
+
     try {
       historicalRuns = await client.getHistoricalRuns(
         eventContext.owner,
         eventContext.repo,
-        eventContext.workflowName,
+        workflowQuery,
         eventContext.runId,
         config.historyDepth,
       );

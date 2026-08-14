@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createChunkedLogStream, GitHubLogStreamProvider } from '../../src/github/log-stream.js';
 import { parseLogStream } from '../../src/parser/stream-parser.js';
 import { DEFAULT_ANALYSIS_CONFIG } from '../../src/core/classifier.js';
@@ -68,7 +68,27 @@ describe('Phase 5 GitHub Streaming Log Provider (log-stream.ts)', () => {
     expect(lines).toEqual(['🚨 Failure detected in auth.ts']);
   });
 
-  it('6. processes large stream incrementally without creating one giant string', async () => {
+  it('6. bounds raw line buffer on a giant 10MB line and resumes parsing subsequent lines', async () => {
+    const chunk10MB = 'X'.repeat(10 * 1024 * 1024); // 10MB chunk without newline
+
+    async function* makeGiantLineStream() {
+      yield 'Normal line before\n';
+      yield chunk10MB;
+      yield '\nNormal line after\n';
+    }
+
+    // Set maxLineBufferLength to 1024 characters for test
+    const lines = await collectLines(
+      createChunkedLogStream(makeGiantLineStream(), { maxLineBufferLength: 1024 }),
+    );
+
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toBe('Normal line before');
+    expect(lines[1]).toHaveLength(1024); // Truncated bounded line representation
+    expect(lines[2]).toBe('Normal line after'); // Resumed parsing cleanly after newline
+  });
+
+  it('7. processes large stream incrementally without creating one giant string', async () => {
     const totalLines = 10000;
     let chunksGenerated = 0;
 
@@ -89,7 +109,7 @@ describe('Phase 5 GitHub Streaming Log Provider (log-stream.ts)', () => {
     expect(chunksGenerated).toBe(totalLines);
   });
 
-  it('7. integrates cleanly with Phase 2 StreamLogParser', async () => {
+  it('8. integrates cleanly with Phase 2 StreamLogParser', async () => {
     async function* makeErrorChunks() {
       yield '2026-08-14T08:00:00Z [info] Starting test suite...\n';
       yield 'FAIL src/auth/login.test.ts\n';
@@ -113,7 +133,7 @@ describe('Phase 5 GitHub Streaming Log Provider (log-stream.ts)', () => {
     ).toBe(true);
   });
 
-  it('8. truncation remains bounded by Phase 2 maxLogSizeBytes configuration', async () => {
+  it('9. truncation remains bounded by Phase 2 maxLogSizeBytes configuration', async () => {
     async function* makeInfiniteChunks() {
       while (true) {
         yield 'A'.repeat(100) + '\n';
@@ -128,5 +148,62 @@ describe('Phase 5 GitHub Streaming Log Provider (log-stream.ts)', () => {
 
     expect(parseResult.bytesProcessed).toBeLessThanOrEqual(1024 + 200);
     expect(parseResult.totalLinesProcessed).toBeGreaterThan(0);
+  });
+
+  it('10. verifies stream cancellation is triggered on early consumer termination', async () => {
+    let cancelCalled = false;
+    let lockReleased = false;
+
+    // Simulate an underlying ReadableStreamReader
+    const mockReader = {
+      read: vi
+        .fn()
+        .mockResolvedValueOnce({ done: false, value: Buffer.from('line 1\n') })
+        .mockResolvedValueOnce({ done: false, value: Buffer.from('line 2\n') })
+        .mockResolvedValueOnce({ done: false, value: Buffer.from('line 3\n') }),
+      cancel: vi.fn().mockImplementation(async () => {
+        cancelCalled = true;
+      }),
+      releaseLock: vi.fn().mockImplementation(() => {
+        lockReleased = true;
+      }),
+    };
+
+    // Construct stream factory mimicking OctokitClient's getJobLogStream
+    const streamFactory = async function* (): AsyncIterable<Uint8Array> {
+      let completedNaturally = false;
+      try {
+        while (true) {
+          const { done, value } = await mockReader.read();
+          if (done) {
+            completedNaturally = true;
+            break;
+          }
+          if (value) yield value;
+        }
+      } finally {
+        if (!completedNaturally) {
+          try {
+            await mockReader.cancel();
+          } catch {
+            // Ignore
+          }
+        }
+        mockReader.releaseLock();
+      }
+    };
+
+    const provider = new GitHubLogStreamProvider(() => streamFactory());
+    const lineIterator = provider.getLineStream()[Symbol.asyncIterator]();
+
+    // Consumer reads only 1 line and stops early
+    const firstLine = await lineIterator.next();
+    expect(firstLine.value).toBe('line 1');
+    if (lineIterator.return) {
+      await lineIterator.return();
+    }
+
+    expect(cancelCalled).toBe(true);
+    expect(lockReleased).toBe(true);
   });
 });

@@ -1,8 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { parseActionInputs } from '../../src/github/inputs.js';
 import { extractEventContext } from '../../src/github/event-context.js';
 import { buildAnalysisContext } from '../../src/github/context-builder.js';
-import { FailedJobDetails, GitHubClient, OctokitClient } from '../../src/github/octokit-client.js';
+import {
+  FailedJobDetails,
+  GitHubClient,
+  HistoricalRunsQuery,
+  OctokitClient,
+} from '../../src/github/octokit-client.js';
 import { runActionOrchestrator } from '../../src/action-entry.js';
 import { createStringLogProvider } from '../../src/core/log-provider.js';
 import { FIXTURES } from '../fixtures/index.js';
@@ -30,6 +35,7 @@ class MockGitHubClient implements GitHubClient {
   public postPRCommentCalls: Array<{ pullNumber: number; body: string }> = [];
   public shouldFailPRComment = false;
   public shouldFailJobFetch = false;
+  public shouldFailLogStream = false;
   public shouldFailChangedFiles = false;
   public shouldFailHistoricalRuns = false;
 
@@ -50,6 +56,9 @@ class MockGitHubClient implements GitHubClient {
   }
 
   async getJobLogStream(_owner: string, _repo: string, _jobId: number): Promise<LogStreamProvider> {
+    if (this.shouldFailLogStream) {
+      throw new Error('HTTP 404: Job log not found or expired');
+    }
     return createStringLogProvider(this.logContent);
   }
 
@@ -63,7 +72,7 @@ class MockGitHubClient implements GitHubClient {
   async getHistoricalRuns(
     _owner: string,
     _repo: string,
-    _workflowNameOrId: string,
+    _workflowQuery: string | HistoricalRunsQuery,
     _currentRunId: number,
     _depth: number,
   ): Promise<HistoricalRun[]> {
@@ -175,7 +184,7 @@ describe('Phase 5 GitHub Integration', () => {
     });
   });
 
-  describe('3. GitHub Context Extraction', () => {
+  describe('3. GitHub Context Extraction & Workflow Identifiers', () => {
     it('maps standard pull_request event context', () => {
       const rawContext = {
         eventName: 'pull_request',
@@ -203,7 +212,7 @@ describe('Phase 5 GitHub Integration', () => {
       expect(eventContext.pullNumber).toBe(42);
     });
 
-    it('maps workflow_run event context', () => {
+    it('maps workflow_run event context with precise workflowId and path', () => {
       const rawContext = {
         eventName: 'workflow_run',
         runId: 9999,
@@ -213,6 +222,8 @@ describe('Phase 5 GitHub Integration', () => {
         payload: {
           workflow_run: {
             id: 5005,
+            workflow_id: 12345,
+            path: '.github/workflows/ci.yml',
             name: 'Target App Build',
             head_sha: 'wf_target_sha',
             head_branch: 'feature-branch',
@@ -223,6 +234,8 @@ describe('Phase 5 GitHub Integration', () => {
 
       const eventContext = extractEventContext(rawContext);
       expect(eventContext.runId).toBe(5005);
+      expect(eventContext.workflowId).toBe('12345');
+      expect(eventContext.workflowPath).toBe('.github/workflows/ci.yml');
       expect(eventContext.workflowName).toBe('Target App Build');
       expect(eventContext.sha).toBe('wf_target_sha');
       expect(eventContext.ref).toBe('feature-branch');
@@ -251,7 +264,6 @@ describe('Phase 5 GitHub Integration', () => {
   describe('4. Failed Job Selection Logic', () => {
     it('prioritizes explicitly preferred job if it failed', async () => {
       const client = new OctokitClient('mock_token');
-      // Mock the internal octokit call
       (client as unknown as { octokit: unknown }).octokit = {
         rest: {
           actions: {
@@ -320,7 +332,6 @@ describe('Phase 5 GitHub Integration', () => {
         },
       };
 
-      // Since there is no 'failure' job, it should deterministically select the 'timed_out' job over 'cancelled'
       const selected = await client.getFailedJob('owner', 'repo', 200);
       expect(selected?.jobId).toBe(20);
       expect(selected?.jobName).toBe('integration-tests');
@@ -378,7 +389,6 @@ describe('Phase 5 GitHub Integration', () => {
         },
       };
 
-      // Mock getJobLogStream to return failure log for historical failed run
       client.getJobLogStream = async () =>
         createStringLogProvider(
           'FAIL src/auth/login.test.ts\n  ✕ expected false to be true\n  AssertionError: expected false to be true',
@@ -399,7 +409,45 @@ describe('Phase 5 GitHub Integration', () => {
     });
   });
 
-  describe('6. Context Builder & Graceful Degradation', () => {
+  describe('6. Context Builder & Error Handling', () => {
+    it('throws actionable error when core log retrieval fails (no silent empty UNKNOWN)', async () => {
+      const client = new MockGitHubClient();
+      client.shouldFailLogStream = true;
+
+      const eventContext = extractEventContext({
+        eventName: 'pull_request',
+        runId: 200,
+        workflow: 'Build Workflow',
+        job: 'build-and-test',
+        repo: { owner: 'acme', repo: 'app' },
+        payload: { pull_request: { number: 10 } },
+      });
+
+      const inputs = parseActionInputs((name) => (name === 'github-token' ? 'token123' : ''));
+      await expect(buildAnalysisContext(eventContext, inputs.config, client)).rejects.toThrow(
+        'Failed to retrieve job log stream for failed job "build-and-test"',
+      );
+    });
+
+    it('throws actionable error when no failed job can be found', async () => {
+      const client = new MockGitHubClient();
+      client.failedJobResult = null;
+
+      const eventContext = extractEventContext({
+        eventName: 'pull_request',
+        runId: 200,
+        workflow: 'Build Workflow',
+        job: 'build-and-test',
+        repo: { owner: 'acme', repo: 'app' },
+        payload: { pull_request: { number: 10 } },
+      });
+
+      const inputs = parseActionInputs((name) => (name === 'github-token' ? 'token123' : ''));
+      await expect(buildAnalysisContext(eventContext, inputs.config, client)).rejects.toThrow(
+        'No eligible failed, timed out, or unsuccessful job was found for run 200',
+      );
+    });
+
     it('builds platform-agnostic AnalysisContext with warnings on degraded optional APIs', async () => {
       const client = new MockGitHubClient();
       client.shouldFailChangedFiles = true;
@@ -483,6 +531,41 @@ describe('Phase 5 GitHub Integration', () => {
       expect(client.postPRCommentCalls[0].pullNumber).toBe(7);
       expect(client.postPRCommentCalls[0].body).toContain('NETWORK');
       expect(loggedInfo).toContain('CI Triage completed: NETWORK');
+    });
+
+    it('fails the Action via core.setFailed when log retrieval fails without leaking secrets', async () => {
+      const client = new MockGitHubClient();
+      client.shouldFailLogStream = true;
+
+      const sensitiveToken = 'ghp_secret_key_to_mask_123';
+      const inputGetter = (name: string) => {
+        if (name === 'github-token') return sensitiveToken;
+        return '';
+      };
+
+      const githubContext = {
+        eventName: 'pull_request',
+        runId: 300,
+        workflow: 'Test Pipeline',
+        job: 'unit-tests',
+        repo: { owner: 'my-org', repo: 'my-repo' },
+        payload: { pull_request: { number: 7 } },
+      };
+
+      let failedMessage = '';
+      const core = await import('@actions/core');
+      vi.spyOn(core, 'setFailed').mockImplementation((msg: string | Error) => {
+        failedMessage = typeof msg === 'string' ? msg : msg.message;
+      });
+
+      await runActionOrchestrator({
+        inputGetter,
+        githubContext,
+        client,
+      });
+
+      expect(failedMessage).toContain('CI Triage Action failed: Failed to retrieve job log stream');
+      expect(failedMessage).not.toContain(sensitiveToken);
     });
 
     it('disables PR commenting when comment-on-pr is false', async () => {
@@ -577,6 +660,141 @@ describe('Phase 5 GitHub Integration', () => {
       expect(maskedSecret).toBe(sensitiveToken);
       expect(warnedMessage).toContain('Failed to post comment to PR #12');
       expect(warnedMessage).not.toContain(sensitiveToken);
+    });
+  });
+
+  describe('8. Historical Flaky Test Evidence Scenarios', () => {
+    it('historical failure with NO comparable subsequent success does NOT trigger FLAKY_TEST', async () => {
+      const client = new MockGitHubClient();
+      client.logContent = FIXTURES.jestAssertionFailure;
+      // Failed runs in the past with the same fingerprint, but NO subsequent success
+      client.historicalRunsResult = [
+        {
+          runId: 901,
+          workflowId: 'ci.yml',
+          commitSha: 'sha1',
+          conclusion: 'failure',
+          createdAt: '2026-08-13T00:00:00Z',
+          fingerprints: [
+            // Corresponds to Jest assertion failure fingerprint
+            'e2e46b38c2323e200257c79e6027a4dff28330777e5e317c376bb46d234a938c',
+          ],
+        },
+      ];
+
+      const outputs: Record<string, string> = {};
+      await runActionOrchestrator({
+        inputGetter: (name) => (name === 'github-token' ? 'tok' : ''),
+        githubContext: {
+          eventName: 'pull_request',
+          runId: 1000,
+          workflow: 'ci.yml',
+          repo: { owner: 'o', repo: 'r' },
+          payload: { pull_request: { number: 1 } },
+        },
+        client,
+        summaryWriter: async () => {},
+        outputSetter: (name, val) => {
+          outputs[name] = val;
+        },
+      });
+
+      expect(outputs.classification).toBe('TEST_FAILURE'); // Not FLAKY_TEST
+    });
+
+    it('unrelated successful workflow does NOT trigger FLAKY_TEST', async () => {
+      const client = new MockGitHubClient();
+      client.logContent = FIXTURES.jestAssertionFailure;
+      client.historicalRunsResult = [
+        {
+          runId: 901,
+          workflowId: 'ci.yml',
+          commitSha: 'sha1',
+          conclusion: 'failure',
+          createdAt: '2026-08-13T00:00:00Z',
+          fingerprints: ['e2e46b38c2323e200257c79e6027a4dff28330777e5e317c376bb46d234a938c'],
+        },
+        {
+          runId: 902,
+          workflowId: 'deploy-prod.yml', // Different unrelated workflow!
+          commitSha: 'sha999',
+          conclusion: 'success',
+          createdAt: '2026-08-14T00:00:00Z',
+          fingerprints: [],
+        },
+      ];
+
+      const outputs: Record<string, string> = {};
+      await runActionOrchestrator({
+        inputGetter: (name) => (name === 'github-token' ? 'tok' : ''),
+        githubContext: {
+          eventName: 'pull_request',
+          runId: 1000,
+          workflow: 'ci.yml',
+          repo: { owner: 'o', repo: 'r' },
+          payload: { pull_request: { number: 1 } },
+        },
+        client,
+        summaryWriter: async () => {},
+        outputSetter: (name, val) => {
+          outputs[name] = val;
+        },
+      });
+
+      expect(outputs.classification).toBe('TEST_FAILURE');
+    });
+
+    it('valid comparable failure->subsequent success on same workflow triggers FLAKY_TEST', async () => {
+      const client = new MockGitHubClient();
+      client.changedFilesResult = []; // No PR diff correlation so test failure does not become CODE_REGRESSION
+      client.logContent = FIXTURES.flakyTest;
+      // Extract all fingerprints generated by the log:
+      const parseResult = await (
+        await import('../../src/parser/stream-parser.js')
+      ).parseLogStream(
+        createStringLogProvider(FIXTURES.flakyTest),
+        (await import('../../src/core/classifier.js')).DEFAULT_ANALYSIS_CONFIG,
+      );
+      const allFps = parseResult.frames.map((f) => f.fingerprint.canonicalHash);
+
+      client.historicalRunsResult = [
+        {
+          runId: 801,
+          workflowId: 'ci.yml',
+          commitSha: 'sha1',
+          conclusion: 'failure',
+          createdAt: '2026-08-12T00:00:00Z',
+          fingerprints: allFps,
+        },
+        {
+          runId: 802,
+          workflowId: 'ci.yml',
+          commitSha: 'sha2',
+          conclusion: 'success',
+          createdAt: '2026-08-13T00:00:00Z',
+          fingerprints: [],
+        },
+      ];
+
+      const outputs: Record<string, string> = {};
+      await runActionOrchestrator({
+        inputGetter: (name) => (name === 'github-token' ? 'tok' : ''),
+        githubContext: {
+          eventName: 'pull_request',
+          runId: 1000,
+          workflow: 'ci.yml',
+          repo: { owner: 'o', repo: 'r' },
+          payload: { pull_request: { number: 1 } },
+        },
+        client,
+        summaryWriter: async () => {},
+        outputSetter: (name, val) => {
+          outputs[name] = val;
+        },
+      });
+
+      expect(outputs.classification).toBe('FLAKY_TEST');
+      expect(Number(outputs.confidence)).toBeGreaterThanOrEqual(75);
     });
   });
 });

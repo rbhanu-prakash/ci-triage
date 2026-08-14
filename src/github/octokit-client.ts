@@ -11,6 +11,12 @@ export interface FailedJobDetails {
   conclusion: 'failure' | 'timed_out' | 'cancelled' | string;
 }
 
+export interface HistoricalRunsQuery {
+  workflowId?: string;
+  workflowPath?: string;
+  workflowName?: string;
+}
+
 export interface GitHubClient {
   getFailedJob(
     owner: string,
@@ -23,7 +29,7 @@ export interface GitHubClient {
   getHistoricalRuns(
     owner: string,
     repo: string,
-    workflowNameOrId: string,
+    workflowQuery: string | HistoricalRunsQuery,
     currentRunId: number,
     depth: number,
   ): Promise<HistoricalRun[]>;
@@ -161,11 +167,10 @@ export class OctokitClient implements GitHubClient {
 
   /**
    * Fetches the job log stream without buffering the entire log into memory.
+   * Cancels the underlying response stream reader upon early termination.
    */
   async getJobLogStream(owner: string, repo: string, jobId: number): Promise<LogStreamProvider> {
     const url = `https://api.github.com/repos/${owner}/${repo}/actions/jobs/${jobId}/logs`;
-
-    // Estimate size or verify availability before streaming
     let estimatedSize: number | undefined;
 
     const streamFactory = async function* (token: string): AsyncIterable<Uint8Array> {
@@ -195,13 +200,25 @@ export class OctokitClient implements GitHubClient {
       }
 
       const reader = response.body.getReader();
+      let completedNaturally = false;
+
       try {
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            completedNaturally = true;
+            break;
+          }
           if (value) yield value;
         }
       } finally {
+        if (!completedNaturally) {
+          try {
+            await reader.cancel();
+          } catch {
+            // Ignore cancellation errors
+          }
+        }
         reader.releaseLock();
       }
     };
@@ -234,43 +251,63 @@ export class OctokitClient implements GitHubClient {
   async getHistoricalRuns(
     owner: string,
     repo: string,
-    workflowNameOrId: string,
+    workflowQuery: string | HistoricalRunsQuery,
     currentRunId: number,
     depth: number,
   ): Promise<HistoricalRun[]> {
     if (depth <= 0) return [];
 
+    const queryObj: HistoricalRunsQuery =
+      typeof workflowQuery === 'string'
+        ? { workflowName: workflowQuery, workflowId: workflowQuery }
+        : workflowQuery;
+
+    const primaryWorkflowIdentifier =
+      queryObj.workflowId || queryObj.workflowPath || queryObj.workflowName || '';
+
     try {
-      // First attempt querying workflow runs specifically for this workflow
       let rawRuns: Array<{
         id: number;
+        name?: string | null;
+        path?: string;
         workflow_id: number;
         head_sha: string;
         conclusion: string | null;
         created_at: string;
       }> = [];
 
-      try {
-        const response = await this.octokit.rest.actions.listWorkflowRuns({
-          owner,
-          repo,
-          workflow_id: workflowNameOrId,
-          per_page: Math.min(depth + 10, 100),
-        });
-        rawRuns = response.data.workflow_runs;
-      } catch {
-        // Fallback: list workflow runs for repo and filter by workflow name/ID
+      // Attempt targeted workflow runs API if specific ID/filename is available
+      if (queryObj.workflowId || queryObj.workflowPath) {
+        try {
+          const response = await this.octokit.rest.actions.listWorkflowRuns({
+            owner,
+            repo,
+            workflow_id: queryObj.workflowId || queryObj.workflowPath || primaryWorkflowIdentifier,
+            per_page: Math.min(depth + 10, 100),
+          });
+          rawRuns = response.data.workflow_runs;
+        } catch {
+          // Fall through to repository listing on 404/failure
+        }
+      }
+
+      if (rawRuns.length === 0) {
         const response = await this.octokit.rest.actions.listWorkflowRunsForRepo({
           owner,
           repo,
           per_page: Math.min(depth + 15, 100),
         });
-        rawRuns = (response.data.workflow_runs || []).filter(
-          (r) =>
-            r.name === workflowNameOrId ||
-            String(r.workflow_id) === workflowNameOrId ||
-            r.path?.includes(workflowNameOrId),
-        );
+        rawRuns = (response.data.workflow_runs || []).filter((r) => {
+          if (queryObj.workflowId && String(r.workflow_id) === queryObj.workflowId) return true;
+          if (queryObj.workflowPath && r.path && r.path.includes(queryObj.workflowPath))
+            return true;
+          if (queryObj.workflowName && r.name === queryObj.workflowName) return true;
+          return (
+            r.name === primaryWorkflowIdentifier ||
+            String(r.workflow_id) === primaryWorkflowIdentifier ||
+            r.path?.includes(primaryWorkflowIdentifier)
+          );
+        });
       }
 
       // Filter out current run, enforce valid timestamps, and slice to requested depth

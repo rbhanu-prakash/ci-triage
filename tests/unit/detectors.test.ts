@@ -202,7 +202,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
             commitSha: 'sha1234',
             conclusion: 'success',
             createdAt: '2026-08-10T12:00:00Z',
-            fingerprints: [fp.canonicalHash],
+            fingerprints: [],
           },
           {
             runId: 49,

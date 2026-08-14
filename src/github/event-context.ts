@@ -3,6 +3,8 @@ export interface EventContext {
   repo: string;
   runId: number;
   workflowName: string;
+  workflowId?: string;
+  workflowPath?: string;
   jobName: string;
   sha: string;
   ref: string;
@@ -26,6 +28,8 @@ export function extractEventContext(rawContext: unknown): EventContext {
 
   let runId = typeof ctx.runId === 'number' ? ctx.runId : 0;
   let workflowName = typeof ctx.workflow === 'string' ? ctx.workflow : 'Unknown Workflow';
+  let workflowId: string | undefined;
+  let workflowPath: string | undefined;
   let sha = pullRequest?.head?.sha || (typeof ctx.sha === 'string' ? ctx.sha : '');
   let ref = typeof ctx.ref === 'string' ? ctx.ref : '';
   let pullNumber: number | undefined;
@@ -41,6 +45,8 @@ export function extractEventContext(rawContext: unknown): EventContext {
   const workflowRun = payload.workflow_run as
     | {
         id?: number;
+        workflow_id?: number | string;
+        path?: string;
         name?: string;
         head_sha?: string;
         head_branch?: string;
@@ -51,6 +57,12 @@ export function extractEventContext(rawContext: unknown): EventContext {
   if (eventName === 'workflow_run' && workflowRun) {
     if (typeof workflowRun.id === 'number') {
       runId = workflowRun.id;
+    }
+    if (workflowRun.workflow_id !== undefined && workflowRun.workflow_id !== null) {
+      workflowId = String(workflowRun.workflow_id);
+    }
+    if (workflowRun.path) {
+      workflowPath = workflowRun.path;
     }
     if (workflowRun.name) {
       workflowName = workflowRun.name;
@@ -81,6 +93,8 @@ export function extractEventContext(rawContext: unknown): EventContext {
     repo: repoName,
     runId,
     workflowName,
+    workflowId,
+    workflowPath,
     jobName,
     sha,
     ref,
