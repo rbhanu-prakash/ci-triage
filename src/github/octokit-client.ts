@@ -17,6 +17,40 @@ export interface HistoricalRunsQuery {
   workflowName?: string;
 }
 
+/**
+ * Resolves the primary workflow identifier following strict priority:
+ * 1. workflowId (most precise, unique numerical ID as string)
+ * 2. workflowPath (relative workflow YAML path, e.g., ".github/workflows/ci.yml")
+ * 3. workflowName (human-readable workflow name)
+ *
+ * Never fabricates an identifier when all are absent or undefined.
+ */
+export function resolveWorkflowIdentifier(query: string | HistoricalRunsQuery | undefined): {
+  identifier: string;
+  source: 'workflowId' | 'workflowPath' | 'workflowName' | 'none';
+} {
+  if (!query) {
+    return { identifier: '', source: 'none' };
+  }
+  if (typeof query === 'string') {
+    const trimmed = query.trim();
+    if (!trimmed) return { identifier: '', source: 'none' };
+    return { identifier: trimmed, source: /^\d+$/.test(trimmed) ? 'workflowId' : 'workflowPath' };
+  }
+
+  if (query.workflowId && query.workflowId.trim()) {
+    return { identifier: query.workflowId.trim(), source: 'workflowId' };
+  }
+  if (query.workflowPath && query.workflowPath.trim()) {
+    return { identifier: query.workflowPath.trim(), source: 'workflowPath' };
+  }
+  if (query.workflowName && query.workflowName.trim()) {
+    return { identifier: query.workflowName.trim(), source: 'workflowName' };
+  }
+
+  return { identifier: '', source: 'none' };
+}
+
 export interface GitHubClient {
   getFailedJob(
     owner: string,
@@ -262,8 +296,8 @@ export class OctokitClient implements GitHubClient {
         ? { workflowName: workflowQuery, workflowId: workflowQuery }
         : workflowQuery;
 
-    const primaryWorkflowIdentifier =
-      queryObj.workflowId || queryObj.workflowPath || queryObj.workflowName || '';
+    const { identifier: primaryWorkflowIdentifier, source: identifierSource } =
+      resolveWorkflowIdentifier(queryObj);
 
     try {
       let rawRuns: Array<{
@@ -276,13 +310,13 @@ export class OctokitClient implements GitHubClient {
         created_at: string;
       }> = [];
 
-      // Attempt targeted workflow runs API if specific ID/filename is available
-      if (queryObj.workflowId || queryObj.workflowPath) {
+      // Attempt targeted workflow runs API using highest-priority identifier (workflowId > workflowPath)
+      if (identifierSource === 'workflowId' || identifierSource === 'workflowPath') {
         try {
           const response = await this.octokit.rest.actions.listWorkflowRuns({
             owner,
             repo,
-            workflow_id: queryObj.workflowId || queryObj.workflowPath || primaryWorkflowIdentifier,
+            workflow_id: primaryWorkflowIdentifier,
             per_page: Math.min(depth + 10, 100),
           });
           rawRuns = response.data.workflow_runs;
@@ -298,15 +332,23 @@ export class OctokitClient implements GitHubClient {
           per_page: Math.min(depth + 15, 100),
         });
         rawRuns = (response.data.workflow_runs || []).filter((r) => {
-          if (queryObj.workflowId && String(r.workflow_id) === queryObj.workflowId) return true;
-          if (queryObj.workflowPath && r.path && r.path.includes(queryObj.workflowPath))
-            return true;
-          if (queryObj.workflowName && r.name === queryObj.workflowName) return true;
-          return (
-            r.name === primaryWorkflowIdentifier ||
-            String(r.workflow_id) === primaryWorkflowIdentifier ||
-            r.path?.includes(primaryWorkflowIdentifier)
-          );
+          if (identifierSource === 'workflowId' && queryObj.workflowId) {
+            return String(r.workflow_id) === queryObj.workflowId;
+          }
+          if (identifierSource === 'workflowPath' && queryObj.workflowPath) {
+            return Boolean(r.path && r.path.includes(queryObj.workflowPath));
+          }
+          if (identifierSource === 'workflowName' && queryObj.workflowName) {
+            return r.name === queryObj.workflowName;
+          }
+          if (primaryWorkflowIdentifier) {
+            return (
+              r.name === primaryWorkflowIdentifier ||
+              String(r.workflow_id) === primaryWorkflowIdentifier ||
+              r.path?.includes(primaryWorkflowIdentifier)
+            );
+          }
+          return true;
         });
       }
 

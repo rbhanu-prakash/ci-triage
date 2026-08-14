@@ -341,6 +341,46 @@ describe('Phase 5 GitHub Integration', () => {
   });
 
   describe('5. Historical Runs & Fingerprint Extraction', () => {
+    it('resolves workflow identifier according to priority (workflowId > workflowPath > workflowName)', async () => {
+      const { resolveWorkflowIdentifier } = await import('../../src/github/octokit-client.js');
+
+      // 1. workflowId preferred when all three are present
+      expect(
+        resolveWorkflowIdentifier({
+          workflowId: '12345',
+          workflowPath: '.github/workflows/ci.yml',
+          workflowName: 'CI Workflow',
+        }),
+      ).toEqual({ identifier: '12345', source: 'workflowId' });
+
+      // 2. workflowPath fallback when workflowId is absent
+      expect(
+        resolveWorkflowIdentifier({
+          workflowId: undefined,
+          workflowPath: '.github/workflows/ci.yml',
+          workflowName: 'CI Workflow',
+        }),
+      ).toEqual({ identifier: '.github/workflows/ci.yml', source: 'workflowPath' });
+
+      // 3. workflowName fallback when workflowId and workflowPath are absent
+      expect(
+        resolveWorkflowIdentifier({
+          workflowId: undefined,
+          workflowPath: undefined,
+          workflowName: 'CI Workflow',
+        }),
+      ).toEqual({ identifier: 'CI Workflow', source: 'workflowName' });
+
+      // 4. No identifier fabricated when all are absent or empty
+      expect(
+        resolveWorkflowIdentifier({
+          workflowId: '',
+          workflowPath: '   ',
+          workflowName: undefined,
+        }),
+      ).toEqual({ identifier: '', source: 'none' });
+    });
+
     it('retrieves same-workflow historical runs, excludes current run, and derives fingerprints', async () => {
       const client = new OctokitClient('mock_token');
       (client as unknown as { octokit: unknown }).octokit = {
@@ -744,7 +784,60 @@ describe('Phase 5 GitHub Integration', () => {
       expect(outputs.classification).toBe('TEST_FAILURE');
     });
 
-    it('valid comparable failure->subsequent success on same workflow triggers FLAKY_TEST', async () => {
+    it('historical failure with unrelated subsequent success (different commit, no test linkage) does NOT trigger FLAKY_TEST', async () => {
+      const client = new MockGitHubClient();
+      client.changedFilesResult = []; // No PR diff correlation so test failure does not become CODE_REGRESSION
+      client.logContent = FIXTURES.jestAssertionFailure;
+      const parseResult = await (
+        await import('../../src/parser/stream-parser.js')
+      ).parseLogStream(
+        createStringLogProvider(FIXTURES.jestAssertionFailure),
+        (await import('../../src/core/classifier.js')).DEFAULT_ANALYSIS_CONFIG,
+      );
+      const allFps = parseResult.frames.map((f) => f.fingerprint.canonicalHash);
+
+      // Workflow matches but commits are different and no retry/test passed proof exists
+      client.historicalRunsResult = [
+        {
+          runId: 801,
+          workflowId: 'ci.yml',
+          commitSha: 'sha1_broken',
+          conclusion: 'failure',
+          createdAt: '2026-08-12T00:00:00Z',
+          fingerprints: allFps,
+        },
+        {
+          runId: 802,
+          workflowId: 'ci.yml',
+          commitSha: 'sha2_developer_fix',
+          conclusion: 'success',
+          createdAt: '2026-08-13T00:00:00Z',
+          fingerprints: [],
+        },
+      ];
+
+      const outputs: Record<string, string> = {};
+      await runActionOrchestrator({
+        inputGetter: (name) => (name === 'github-token' ? 'tok' : ''),
+        githubContext: {
+          eventName: 'pull_request',
+          runId: 1000,
+          workflow: 'ci.yml',
+          repo: { owner: 'o', repo: 'r' },
+          payload: { pull_request: { number: 1 } },
+        },
+        client,
+        summaryWriter: async () => {},
+        outputSetter: (name, val) => {
+          outputs[name] = val;
+        },
+      });
+
+      // Does NOT trigger FLAKY_TEST because the subsequent success is not reliably comparable; falls back to TEST_FAILURE
+      expect(outputs.classification).toBe('TEST_FAILURE');
+    });
+
+    it('valid comparable failure->subsequent success (same-commit retry) triggers FLAKY_TEST', async () => {
       const client = new MockGitHubClient();
       client.changedFilesResult = []; // No PR diff correlation so test failure does not become CODE_REGRESSION
       client.logContent = FIXTURES.flakyTest;
@@ -761,7 +854,7 @@ describe('Phase 5 GitHub Integration', () => {
         {
           runId: 801,
           workflowId: 'ci.yml',
-          commitSha: 'sha1',
+          commitSha: 'sha1_retryable',
           conclusion: 'failure',
           createdAt: '2026-08-12T00:00:00Z',
           fingerprints: allFps,
@@ -769,7 +862,7 @@ describe('Phase 5 GitHub Integration', () => {
         {
           runId: 802,
           workflowId: 'ci.yml',
-          commitSha: 'sha2',
+          commitSha: 'sha1_retryable', // Same commit retry succeeds
           conclusion: 'success',
           createdAt: '2026-08-13T00:00:00Z',
           fingerprints: [],

@@ -58,6 +58,16 @@ export interface HistoricalRun {
   createdAt: string;
   /** List of canonical fingerprint hashes observed in this historical run */
   fingerprints: string[];
+  /** Optional job name for granular job-level comparability */
+  jobName?: string;
+  /** Optional list of test identifiers/names passed in this run (e.g. from test suites/reporters) */
+  testsPassed?: string[];
+  /** Optional list of test identifiers/names executed in this run */
+  testsExecuted?: string[];
+  /** Whether the run is from the exact same branch / PR execution stream */
+  branch?: string;
+  /** Optional rerun / retry indicator linking to the predecessor run */
+  isRerunOf?: number;
 }
 
 export interface AnalysisContext {

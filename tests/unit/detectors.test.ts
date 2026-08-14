@@ -199,7 +199,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
           {
             runId: 50,
             workflowId: 'ci.yml',
-            commitSha: 'sha1234',
+            commitSha: 'sha1233', // Same-commit retry succeeds
             conclusion: 'success',
             createdAt: '2026-08-10T12:00:00Z',
             fingerprints: [],
@@ -207,7 +207,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
           {
             runId: 49,
             workflowId: 'ci.yml',
-            commitSha: 'sha1233',
+            commitSha: 'sha1233', // Preceding run failed on same commit
             conclusion: 'failure',
             createdAt: '2026-08-09T12:00:00Z',
             fingerprints: [fp.canonicalHash],
@@ -809,6 +809,115 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
       const result = detector.detect({ context, parseResult });
 
       expect(result).toBeNull();
+    });
+
+    it('unrelated subsequent success with different commit and no test link -> null', async () => {
+      const log =
+        'Error: Flaky async timing assertion failed\n    at testFn (tests/unit/api.test.ts:42:10)';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const errLine = parseResult.frames[0].rawErrorLine;
+      const { generateFingerprint } = await import('../../src/parser/fingerprint.js');
+      const fp = generateFingerprint(errLine);
+
+      // Workflow matches but commits differ and no test passing evidence exists
+      const historicalRuns: AnalysisContext['historicalRuns'] = [
+        {
+          runId: 100,
+          workflowId: 'ci.yml',
+          commitSha: 'shaA_broken',
+          conclusion: 'failure',
+          createdAt: '2026-08-11T10:00:00Z',
+          fingerprints: [fp.canonicalHash],
+        },
+        {
+          runId: 101,
+          workflowId: 'ci.yml',
+          commitSha: 'shaB_fixed_by_developer',
+          conclusion: 'success',
+          createdAt: '2026-08-11T11:00:00Z',
+          fingerprints: [],
+        },
+      ];
+
+      const context = createMockContext([], historicalRuns);
+      const detector = new FlakyTestDetector();
+      const result = detector.detect({ context, parseResult });
+
+      expect(result).toBeNull();
+    });
+
+    it('subsequent success with specific test identity in testsPassed -> FLAKY_TEST', async () => {
+      const log =
+        'Error: Flaky async timing assertion failed\n    at testFn (tests/unit/api.test.ts:42:10)';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const errLine = parseResult.frames[0].rawErrorLine;
+      const { generateFingerprint } = await import('../../src/parser/fingerprint.js');
+      const fp = generateFingerprint(errLine);
+
+      const historicalRuns: AnalysisContext['historicalRuns'] = [
+        {
+          runId: 200,
+          workflowId: 'ci.yml',
+          commitSha: 'shaCommit1',
+          conclusion: 'failure',
+          createdAt: '2026-08-12T10:00:00Z',
+          fingerprints: [fp.canonicalHash],
+        },
+        {
+          runId: 201,
+          workflowId: 'ci.yml',
+          commitSha: 'shaCommit2',
+          conclusion: 'success',
+          createdAt: '2026-08-12T11:00:00Z',
+          fingerprints: [],
+          testsPassed: ['tests/unit/api.test.ts:42:10'],
+        },
+      ];
+
+      const context = createMockContext([], historicalRuns);
+      const detector = new FlakyTestDetector();
+      const result = detector.detect({ context, parseResult });
+
+      expect(result).not.toBeNull();
+      expect(result?.category).toBe('FLAKY_TEST');
+      expect(result?.evidence[0].description).toContain('tests/unit/api.test.ts:42:10');
+    });
+
+    it('subsequent success with explicit isRerunOf link -> FLAKY_TEST', async () => {
+      const log =
+        'Error: Flaky async timing assertion failed\n    at testFn (tests/unit/api.test.ts:42:10)';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const errLine = parseResult.frames[0].rawErrorLine;
+      const { generateFingerprint } = await import('../../src/parser/fingerprint.js');
+      const fp = generateFingerprint(errLine);
+
+      const historicalRuns: AnalysisContext['historicalRuns'] = [
+        {
+          runId: 300,
+          workflowId: 'ci.yml',
+          commitSha: 'shaCommit1',
+          conclusion: 'failure',
+          createdAt: '2026-08-12T10:00:00Z',
+          fingerprints: [fp.canonicalHash],
+        },
+        {
+          runId: 301,
+          workflowId: 'ci.yml',
+          commitSha: 'shaCommit2',
+          conclusion: 'success',
+          createdAt: '2026-08-12T11:00:00Z',
+          fingerprints: [],
+          isRerunOf: 300,
+        },
+      ];
+
+      const context = createMockContext([], historicalRuns);
+      const detector = new FlakyTestDetector();
+      const result = detector.detect({ context, parseResult });
+
+      expect(result).not.toBeNull();
+      expect(result?.category).toBe('FLAKY_TEST');
+      expect(result?.evidence[0].description).toContain('Direct retry run #301 succeeded');
     });
   });
 
