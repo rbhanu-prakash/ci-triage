@@ -104,16 +104,10 @@ export class FlakyTestDetector implements Detector {
           continue;
         }
 
-        // Criterion 1: Identical commit rerun (same commit SHA tested failed then passed on retry)
-        const isSameCommitRerun =
-          Boolean(failRun.commitSha) &&
-          Boolean(succRun.commitSha) &&
-          failRun.commitSha === succRun.commitSha;
-
-        // Criterion 2: Explicit rerun relationship
+        // Criterion 1: Explicit rerun relationship (direct retry of the failed run)
         const isExplicitRerun = succRun.isRerunOf === failRun.runId;
 
-        // Criterion 3: Explicit test passing verification in test-level execution metadata
+        // Criterion 2: Explicit test passing verification in test-level execution metadata
         const isSpecificTestPassed = Boolean(
           failedTestIdentifier &&
           succRun.testsPassed &&
@@ -122,27 +116,29 @@ export class FlakyTestDetector implements Detector {
           ),
         );
 
-        if (isSameCommitRerun) {
+        // Same commit alone is supporting context only, NOT standalone comparability evidence.
+        const isSameCommit =
+          Boolean(failRun.commitSha) &&
+          Boolean(succRun.commitSha) &&
+          failRun.commitSha === succRun.commitSha;
+
+        if (isExplicitRerun) {
+          const commitNote = isSameCommit ? ` on commit ${failRun.commitSha.slice(0, 7)}` : '';
           comparableTransitions.push({
             failureRun: failRun,
             successRun: succRun,
-            reason: `Identical commit retry (${failRun.commitSha.slice(0, 7)}) succeeded in run #${succRun.runId} after failing in run #${failRun.runId}`,
-          });
-        } else if (isExplicitRerun) {
-          comparableTransitions.push({
-            failureRun: failRun,
-            successRun: succRun,
-            reason: `Direct retry run #${succRun.runId} succeeded after failure in run #${failRun.runId}`,
+            reason: `Direct retry run #${succRun.runId} succeeded after failure in run #${failRun.runId}${commitNote}`,
           });
         } else if (isSpecificTestPassed) {
+          const commitNote = isSameCommit ? ` (commit ${failRun.commitSha.slice(0, 7)})` : '';
           comparableTransitions.push({
             failureRun: failRun,
             successRun: succRun,
-            reason: `Failing test "${failedTestIdentifier}" recorded as passed in subsequent successful run #${succRun.runId}`,
+            reason: `Failing test "${failedTestIdentifier}" recorded as passed in subsequent successful run #${succRun.runId}${commitNote}`,
           });
         }
-        // Notice: If only workflowId matched across different commits with no retry/test proof,
-        // we deliberately do NOT treat it as a comparable transition.
+        // If only same workflow / same commit without isRerunOf or testsPassed proof:
+        // do NOT treat as comparable transition.
       }
     }
 

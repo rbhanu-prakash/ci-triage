@@ -371,7 +371,25 @@ describe('Phase 5 GitHub Integration', () => {
         }),
       ).toEqual({ identifier: 'CI Workflow', source: 'workflowName' });
 
-      // 4. No identifier fabricated when all are absent or empty
+      // 4. Pure numeric string is recognized as workflowId
+      expect(resolveWorkflowIdentifier('98765')).toEqual({
+        identifier: '98765',
+        source: 'workflowId',
+      });
+
+      // 5. Workflow path string (.yml) is recognized as workflowPath
+      expect(resolveWorkflowIdentifier('.github/workflows/build.yml')).toEqual({
+        identifier: '.github/workflows/build.yml',
+        source: 'workflowPath',
+      });
+
+      // 6. Non-numeric human-readable name string is NOT treated as numeric workflowId
+      expect(resolveWorkflowIdentifier('Integration & Unit Tests')).toEqual({
+        identifier: 'Integration & Unit Tests',
+        source: 'workflowName',
+      });
+
+      // 7. No identifier fabricated when all are absent or empty
       expect(
         resolveWorkflowIdentifier({
           workflowId: '',
@@ -379,6 +397,8 @@ describe('Phase 5 GitHub Integration', () => {
           workflowName: undefined,
         }),
       ).toEqual({ identifier: '', source: 'none' });
+      expect(resolveWorkflowIdentifier('')).toEqual({ identifier: '', source: 'none' });
+      expect(resolveWorkflowIdentifier(undefined)).toEqual({ identifier: '', source: 'none' });
     });
 
     it('retrieves same-workflow historical runs, excludes current run, and derives fingerprints', async () => {
@@ -837,7 +857,60 @@ describe('Phase 5 GitHub Integration', () => {
       expect(outputs.classification).toBe('TEST_FAILURE');
     });
 
-    it('valid comparable failure->subsequent success (same-commit retry) triggers FLAKY_TEST', async () => {
+    it('same-commit historical success alone without retry or test linkage does NOT trigger FLAKY_TEST', async () => {
+      const client = new MockGitHubClient();
+      client.changedFilesResult = []; // No PR diff correlation
+      client.logContent = FIXTURES.jestAssertionFailure;
+      const parseResult = await (
+        await import('../../src/parser/stream-parser.js')
+      ).parseLogStream(
+        createStringLogProvider(FIXTURES.jestAssertionFailure),
+        (await import('../../src/core/classifier.js')).DEFAULT_ANALYSIS_CONFIG,
+      );
+      const allFps = parseResult.frames.map((f) => f.fingerprint.canonicalHash);
+
+      // Same commit SHA, but no isRerunOf and no testsPassed
+      client.historicalRunsResult = [
+        {
+          runId: 801,
+          workflowId: 'ci.yml',
+          commitSha: 'sha1_same',
+          conclusion: 'failure',
+          createdAt: '2026-08-12T00:00:00Z',
+          fingerprints: allFps,
+        },
+        {
+          runId: 802,
+          workflowId: 'ci.yml',
+          commitSha: 'sha1_same',
+          conclusion: 'success',
+          createdAt: '2026-08-13T00:00:00Z',
+          fingerprints: [],
+        },
+      ];
+
+      const outputs: Record<string, string> = {};
+      await runActionOrchestrator({
+        inputGetter: (name) => (name === 'github-token' ? 'tok' : ''),
+        githubContext: {
+          eventName: 'pull_request',
+          runId: 1000,
+          workflow: 'ci.yml',
+          repo: { owner: 'o', repo: 'r' },
+          payload: { pull_request: { number: 1 } },
+        },
+        client,
+        summaryWriter: async () => {},
+        outputSetter: (name, val) => {
+          outputs[name] = val;
+        },
+      });
+
+      // Does NOT trigger FLAKY_TEST; falls back conservatively to TEST_FAILURE
+      expect(outputs.classification).toBe('TEST_FAILURE');
+    });
+
+    it('valid comparable failure->subsequent success (explicit retry with isRerunOf) triggers FLAKY_TEST', async () => {
       const client = new MockGitHubClient();
       client.changedFilesResult = []; // No PR diff correlation so test failure does not become CODE_REGRESSION
       client.logContent = FIXTURES.flakyTest;
@@ -862,10 +935,11 @@ describe('Phase 5 GitHub Integration', () => {
         {
           runId: 802,
           workflowId: 'ci.yml',
-          commitSha: 'sha1_retryable', // Same commit retry succeeds
+          commitSha: 'sha1_retryable',
           conclusion: 'success',
           createdAt: '2026-08-13T00:00:00Z',
           fingerprints: [],
+          isRerunOf: 801,
         },
       ];
 

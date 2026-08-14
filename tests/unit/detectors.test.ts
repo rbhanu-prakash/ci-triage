@@ -199,15 +199,16 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
           {
             runId: 50,
             workflowId: 'ci.yml',
-            commitSha: 'sha1233', // Same-commit retry succeeds
+            commitSha: 'sha1233',
             conclusion: 'success',
             createdAt: '2026-08-10T12:00:00Z',
             fingerprints: [],
+            isRerunOf: 49,
           },
           {
             runId: 49,
             workflowId: 'ci.yml',
-            commitSha: 'sha1233', // Preceding run failed on same commit
+            commitSha: 'sha1233',
             conclusion: 'failure',
             createdAt: '2026-08-09T12:00:00Z',
             fingerprints: [fp.canonicalHash],
@@ -713,7 +714,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
       expect(result).toBeNull();
     });
 
-    it('4. confirmed comparable failure->success evidence -> FLAKY_TEST', async () => {
+    it('4. confirmed comparable failure->success evidence (explicit rerun) -> FLAKY_TEST', async () => {
       const log = 'Error: Flaky async timing assertion failed';
       const parseResult = await parseLogStream(createStringLogProvider(log));
       const errLine = parseResult.frames[0].rawErrorLine;
@@ -736,6 +737,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
           conclusion: 'success',
           createdAt: '2026-08-09T12:05:00Z',
           fingerprints: [fp.canonicalHash],
+          isRerunOf: 99,
         },
       ];
 
@@ -772,6 +774,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
           conclusion: 'success',
           createdAt: '2026-08-08T12:10:00Z',
           fingerprints: [fp.canonicalHash],
+          isRerunOf: 98,
         },
         {
           runId: 100,
@@ -788,6 +791,7 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
           conclusion: 'success',
           createdAt: '2026-08-11T12:10:00Z',
           fingerprints: [fp.canonicalHash],
+          isRerunOf: 100,
         },
       ];
 
@@ -798,6 +802,40 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
       expect(result).not.toBeNull();
       expect(result?.category).toBe('FLAKY_TEST');
       expect(result?.confidenceScore).toBeGreaterThanOrEqual(85);
+    });
+
+    it('same-commit historical success alone without retry or test link -> null', async () => {
+      const log = 'Error: Flaky async timing assertion failed';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const errLine = parseResult.frames[0].rawErrorLine;
+      const { generateFingerprint } = await import('../../src/parser/fingerprint.js');
+      const fp = generateFingerprint(errLine);
+
+      // Same commit SHA on both failure and subsequent success, but no isRerunOf and no testsPassed
+      const historicalRuns: AnalysisContext['historicalRuns'] = [
+        {
+          runId: 99,
+          workflowId: 'ci.yml',
+          commitSha: 'abc1233',
+          conclusion: 'failure',
+          createdAt: '2026-08-09T12:00:00Z',
+          fingerprints: [fp.canonicalHash],
+        },
+        {
+          runId: 100,
+          workflowId: 'ci.yml',
+          commitSha: 'abc1233',
+          conclusion: 'success',
+          createdAt: '2026-08-09T12:05:00Z',
+          fingerprints: [],
+        },
+      ];
+
+      const context = createMockContext([], historicalRuns);
+      const detector = new FlakyTestDetector();
+      const result = detector.detect({ context, parseResult });
+
+      expect(result).toBeNull();
     });
 
     it('insufficient historical context -> null', async () => {

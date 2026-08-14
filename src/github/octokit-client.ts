@@ -35,17 +35,30 @@ export function resolveWorkflowIdentifier(query: string | HistoricalRunsQuery | 
   if (typeof query === 'string') {
     const trimmed = query.trim();
     if (!trimmed) return { identifier: '', source: 'none' };
-    return { identifier: trimmed, source: /^\d+$/.test(trimmed) ? 'workflowId' : 'workflowPath' };
+    if (/^\d+$/.test(trimmed)) {
+      return { identifier: trimmed, source: 'workflowId' };
+    }
+    if (
+      trimmed.endsWith('.yml') ||
+      trimmed.endsWith('.yaml') ||
+      trimmed.includes('/') ||
+      trimmed.includes('\\')
+    ) {
+      return { identifier: trimmed, source: 'workflowPath' };
+    }
+    return { identifier: trimmed, source: 'workflowName' };
   }
 
-  if (query.workflowId && query.workflowId.trim()) {
-    return { identifier: query.workflowId.trim(), source: 'workflowId' };
-  }
-  if (query.workflowPath && query.workflowPath.trim()) {
-    return { identifier: query.workflowPath.trim(), source: 'workflowPath' };
-  }
-  if (query.workflowName && query.workflowName.trim()) {
-    return { identifier: query.workflowName.trim(), source: 'workflowName' };
+  if (typeof query === 'object') {
+    if (query.workflowId && query.workflowId.trim()) {
+      return { identifier: query.workflowId.trim(), source: 'workflowId' };
+    }
+    if (query.workflowPath && query.workflowPath.trim()) {
+      return { identifier: query.workflowPath.trim(), source: 'workflowPath' };
+    }
+    if (query.workflowName && query.workflowName.trim()) {
+      return { identifier: query.workflowName.trim(), source: 'workflowName' };
+    }
   }
 
   return { identifier: '', source: 'none' };
@@ -291,13 +304,8 @@ export class OctokitClient implements GitHubClient {
   ): Promise<HistoricalRun[]> {
     if (depth <= 0) return [];
 
-    const queryObj: HistoricalRunsQuery =
-      typeof workflowQuery === 'string'
-        ? { workflowName: workflowQuery, workflowId: workflowQuery }
-        : workflowQuery;
-
     const { identifier: primaryWorkflowIdentifier, source: identifierSource } =
-      resolveWorkflowIdentifier(queryObj);
+      resolveWorkflowIdentifier(workflowQuery);
 
     try {
       let rawRuns: Array<{
@@ -332,20 +340,23 @@ export class OctokitClient implements GitHubClient {
           per_page: Math.min(depth + 15, 100),
         });
         rawRuns = (response.data.workflow_runs || []).filter((r) => {
-          if (identifierSource === 'workflowId' && queryObj.workflowId) {
-            return String(r.workflow_id) === queryObj.workflowId;
+          if (identifierSource === 'workflowId') {
+            return String(r.workflow_id) === primaryWorkflowIdentifier;
           }
-          if (identifierSource === 'workflowPath' && queryObj.workflowPath) {
-            return Boolean(r.path && r.path.includes(queryObj.workflowPath));
+          if (identifierSource === 'workflowPath') {
+            return Boolean(
+              r.path &&
+              (r.path === primaryWorkflowIdentifier || r.path.includes(primaryWorkflowIdentifier)),
+            );
           }
-          if (identifierSource === 'workflowName' && queryObj.workflowName) {
-            return r.name === queryObj.workflowName;
+          if (identifierSource === 'workflowName') {
+            return r.name === primaryWorkflowIdentifier;
           }
           if (primaryWorkflowIdentifier) {
             return (
               r.name === primaryWorkflowIdentifier ||
               String(r.workflow_id) === primaryWorkflowIdentifier ||
-              r.path?.includes(primaryWorkflowIdentifier)
+              Boolean(r.path && r.path.includes(primaryWorkflowIdentifier))
             );
           }
           return true;
