@@ -1,0 +1,17 @@
+name: CI Triage E2E Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  intentional-failure:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate deterministic connection failure
+        run: |
+          echo "CI Triage E2E test"
+          curl --fail --silent --show-error http://127.0.0.1:9/test
