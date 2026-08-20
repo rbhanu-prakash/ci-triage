@@ -14,6 +14,7 @@ import {
   ConfigurationDetector,
   CodeRegressionDetector,
   FlakyTestDetector,
+  Classifier,
 } from '../../src/index.js';
 import { createStringLogProvider } from '../../src/core/log-provider.js';
 import { parseLogStream } from '../../src/parser/stream-parser.js';
@@ -374,6 +375,101 @@ describe('Phase 3 Deterministic Failure Detectors', () => {
 
       expect(result?.category).toBe('NETWORK');
       expect(result?.confidenceScore).toBe(60);
+    });
+
+    it('A. curl connection refusal/failure -> NETWORK (high confidence 95)', async () => {
+      const log =
+        "curl: (7) Failed to connect to 127.0.0.1 port 9 after 0 ms: Couldn't connect to server";
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new NetworkDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result).not.toBeNull();
+      expect(result?.category).toBe('NETWORK');
+      expect(result?.confidenceScore).toBe(95);
+      expect(result?.evidence[0].description).toContain(
+        'Observed transport network error signature',
+      );
+      expect(result?.evidence[0].snippet).toContain(
+        'curl: (7) Failed to connect to 127.0.0.1 port 9',
+      );
+    });
+
+    it('B. "Failed to connect" transport failure -> NETWORK (high confidence 95)', async () => {
+      const log = 'Error: Failed to connect to backend microservice at 10.0.0.5:8080';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new NetworkDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result).not.toBeNull();
+      expect(result?.category).toBe('NETWORK');
+      expect(result?.confidenceScore).toBe(95);
+      expect(result?.evidence[0].snippet).toContain(
+        'Failed to connect to backend microservice at 10.0.0.5:8080',
+      );
+    });
+
+    it('C. generic curl command failure without network evidence -> not automatically NETWORK', async () => {
+      const log = 'Error: curl command exited with error code 1 - invalid flags';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new NetworkDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result).toBeNull();
+    });
+
+    it('D. unrelated "server" text -> no NETWORK', async () => {
+      const log = 'Error: Configuration key "server_name" is missing in app config';
+      const parseResult = await parseLogStream(createStringLogProvider(log));
+      const detector = new NetworkDetector();
+      const result = detector.detect({ context: createMockContext(), parseResult });
+
+      expect(result).toBeNull();
+    });
+
+    it('E2E regression: curl transport failure in workflow log classifies as NETWORK not UNKNOWN', async () => {
+      const workflowLog = [
+        '##[group]Run echo...',
+        'CI Triage E2E test',
+        "curl: (7) Failed to connect to 127.0.0.1 port 9 after 0 ms: Couldn't connect to server",
+        'Error: Process completed with exit code 7.',
+      ].join('\n');
+
+      const logProvider = createStringLogProvider(workflowLog);
+      const parseResult = await parseLogStream(logProvider);
+
+      // 1. the curl line becomes part of parsed error/context evidence
+      expect(parseResult.frames.length).toBeGreaterThanOrEqual(1);
+      const primaryFrame = parseResult.frames[0];
+      expect(primaryFrame.rawErrorLine).toContain(
+        "curl: (7) Failed to connect to 127.0.0.1 port 9 after 0 ms: Couldn't connect to server",
+      );
+
+      // 2. the relevant frame exists
+      expect(primaryFrame.linesBefore).toContain('CI Triage E2E test');
+      expect(primaryFrame.linesAfter).toContain('Error: Process completed with exit code 7.');
+
+      // 3. the fingerprint is generated from useful failure evidence
+      expect(primaryFrame.fingerprint.rawErrorLine).toContain('curl: (7) Failed to connect');
+      expect(primaryFrame.fingerprint.canonicalHash).toBeTruthy();
+
+      // 4. NetworkDetector returns NETWORK
+      const context = createMockContext();
+      const detector = new NetworkDetector();
+      const netResult = detector.detect({ context, parseResult });
+      expect(netResult).not.toBeNull();
+      expect(netResult?.category).toBe('NETWORK');
+      expect(netResult?.confidenceScore).toBe(95);
+
+      // 5. the final classifier does not return UNKNOWN for this input
+      const detectorResults = triageAllFailures({ context, parseResult });
+      const classifier = new Classifier();
+      const report = classifier.classify(detectorResults, context);
+
+      expect(report.classification).toBe('NETWORK');
+      expect(report.classification).not.toBe('UNKNOWN');
+      expect(report.confidence).toBeGreaterThanOrEqual(80);
+      expect(report.observedEvidence.length).toBeGreaterThan(0);
     });
   });
 

@@ -3,7 +3,7 @@ import { DetectorResult, EvidenceItem } from '../core/types.js';
 import { generateFingerprint } from '../parser/fingerprint.js';
 
 const SOCKET_NET_PATTERN =
-  /\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|connection reset|connection refused|getaddrinfo ENOTFOUND|Could not resolve host|Name or service not known|FetchError|NetworkError|Failed to fetch)\b/i;
+  /\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|connection reset|connection refused|network is unreachable|getaddrinfo ENOTFOUND|Could not resolve host|Name or service not known|FetchError|NetworkError|Failed to fetch|Failed to connect(?: to)?|Couldn't connect to server|Could not connect to server)\b|curl:\s*\(\s*7\s*\)/i;
 
 const HTTP_NET_STATUS_PATTERN =
   /\b(?:HTTP|status code|Status)\s*(?:408|429|500|502|503|504)\b|\b(?:502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout|429 Too Many Requests)\b/i;
@@ -26,35 +26,41 @@ export class NetworkDetector implements Detector {
     let hasTransportFailure = false;
 
     for (const frame of parseResult.frames) {
-      const allLines = [frame.rawErrorLine, ...frame.linesBefore, ...frame.linesAfter].join('\n');
-
+      const frameLines = [frame.rawErrorLine, ...frame.linesBefore, ...frame.linesAfter];
+      const allLines = frameLines.join('\n');
       const isTestAssertion = TEST_ASSERTION_PATTERN.test(allLines);
-      const socketMatch = SOCKET_NET_PATTERN.exec(allLines);
 
-      if (socketMatch) {
-        hasTransportFailure = true;
-        evidence.push(
-          createEvidenceItem(
-            `net_socket_${frame.id}`,
-            'log_signature',
-            `Observed transport network error signature: "${socketMatch[0]}" in "${frame.rawErrorLine.slice(0, 150)}"`,
-            95,
-            frame.rawErrorLine,
-          ),
-        );
-        if (!primaryRawError) primaryRawError = frame.rawErrorLine;
+      const seenSocketLines = new Set<string>();
+      for (const line of [frame.rawErrorLine, ...frame.linesAfter, ...frame.linesBefore]) {
+        if (!line || seenSocketLines.has(line)) continue;
+        const match = SOCKET_NET_PATTERN.exec(line);
+        if (match) {
+          seenSocketLines.add(line);
+          hasTransportFailure = true;
+          const idx = evidence.length + 1;
+          evidence.push(
+            createEvidenceItem(
+              `net_socket_${frame.id}_${idx}`,
+              'log_signature',
+              `Observed transport network error signature: "${match[0]}" in "${line.slice(0, 150)}"`,
+              95,
+              line,
+            ),
+          );
+          if (!primaryRawError) primaryRawError = line;
+        }
       }
 
       const httpMatch = HTTP_NET_STATUS_PATTERN.exec(allLines);
       if (httpMatch) {
         // Filter out test runner assertions comparing HTTP status codes
-        if (!isTestAssertion || socketMatch) {
+        if (!isTestAssertion || hasTransportFailure) {
           evidence.push(
             createEvidenceItem(
               `net_http_${frame.id}`,
               'log_signature',
               `Observed HTTP network status response: "${httpMatch[0]}" in "${frame.rawErrorLine.slice(0, 150)}"`,
-              socketMatch ? 85 : 60,
+              hasTransportFailure ? 85 : 60,
               frame.rawErrorLine,
             ),
           );

@@ -41,6 +41,13 @@ export const DEFAULT_ERROR_SIGNATURES: string[] = [
   '×',
   'yaml:',
   'undefined:',
+  'curl: (7)',
+  'Failed to connect to',
+  "Couldn't connect to server",
+  'Could not connect to server',
+  'connection refused',
+  'connection reset',
+  'network is unreachable',
 ];
 
 /**

@@ -5,6 +5,7 @@ import {
   createIncrementalLogProvider,
 } from '../../src/core/log-provider.js';
 import { parseLogStream, StreamLogParser } from '../../src/parser/stream-parser.js';
+import { isErrorSignature } from '../../src/parser/error-patterns.js';
 
 describe('Bounded-Memory Log Stream Parser', () => {
   it('should parse a small log and detect single error signature (StringLogStreamProvider)', async () => {
@@ -207,5 +208,36 @@ describe('Bounded-Memory Log Stream Parser', () => {
     expect(result.totalLinesProcessed).toBe(3);
     expect(result.totalErrorsDetected).toBe(1);
     expect(result.frames[0].rawErrorLine).toContain('Error: Failure in step 2');
+  });
+
+  describe('Error Signature Detection (isErrorSignature)', () => {
+    it('A. curl: (7) Failed to connect ... -> true', () => {
+      expect(
+        isErrorSignature(
+          "curl: (7) Failed to connect to 127.0.0.1 port 9 after 0 ms: Couldn't connect to server",
+        ),
+      ).toBe(true);
+    });
+
+    it("B. Couldn't connect to server -> true", () => {
+      expect(isErrorSignature("Couldn't connect to server")).toBe(true);
+      expect(isErrorSignature('Could not connect to server')).toBe(true);
+      expect(isErrorSignature('Failed to connect to backend')).toBe(true);
+      expect(isErrorSignature('connection refused on port 9000')).toBe(true);
+      expect(isErrorSignature('connection reset by peer')).toBe(true);
+      expect(isErrorSignature('network is unreachable')).toBe(true);
+    });
+
+    it('C. ordinary text containing "server" -> false', () => {
+      expect(isErrorSignature('Starting development server on port 3000')).toBe(false);
+      expect(isErrorSignature('Connected to server successfully')).toBe(false);
+      expect(isErrorSignature('Server listening at http://localhost:8080')).toBe(false);
+    });
+
+    it('D. ordinary text containing "failed" -> false', () => {
+      expect(isErrorSignature('Checking if any previously failed steps should run')).toBe(false);
+      expect(isErrorSignature('The step might have failed before recovery')).toBe(false);
+      expect(isErrorSignature('Retrying failed request')).toBe(false);
+    });
   });
 });
