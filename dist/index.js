@@ -31831,7 +31831,7 @@ class Classifier {
         // 2. Filter candidate detectors (ignore UNKNOWN or 0 confidence)
         const validCandidates = results.filter((r) => r.category !== 'UNKNOWN' && r.confidenceScore > 0);
         if (validCandidates.length === 0) {
-            return this.buildUnknownReport(observedEvidence, config, jobName, stepName, 'No deterministic error signatures were detected in the failure log.');
+            return this.buildUnknownReport(observedEvidence, config, jobName, stepName, 'No deterministic error signatures were detected in the failure log.', 0, [], context?.runtimeMetrics, context?.historicalRuns?.length || 0);
         }
         // 3. Resolve conflicts among candidate signals
         const { primary, secondary, conflictPenalty, resolutionReason } = this.resolveConflicts(validCandidates, config);
@@ -31841,7 +31841,7 @@ class Classifier {
         if (rawConfidence < config.unknownThreshold) {
             const reason = resolutionReason ||
                 `Detector confidence (${rawConfidence}) fell below the required threshold (${config.unknownThreshold}).`;
-            return this.buildUnknownReport(observedEvidence, config, jobName, stepName, reason, rawConfidence, secondary);
+            return this.buildUnknownReport(observedEvidence, config, jobName, stepName, reason, rawConfidence, secondary, context?.runtimeMetrics, context?.historicalRuns?.length || 0);
         }
         // 6. Build Inference Details string
         const inferenceDetails = this.buildInferenceDetails(primary, resolutionReason);
@@ -31860,8 +31860,8 @@ class Classifier {
             secondarySignals: secondary.length > 0 ? secondary : undefined,
             metadata: {
                 historyAnalyzed: context?.historicalRuns?.length || 0,
-                logBytesProcessed: 0,
-                durationMs: 0,
+                logBytesProcessed: context?.runtimeMetrics?.logBytesProcessed ?? 0,
+                durationMs: context?.runtimeMetrics?.durationMs ?? 0,
             },
         };
     }
@@ -32016,7 +32016,7 @@ class Classifier {
     /**
      * Constructs a standard report when classification falls below threshold or yields UNKNOWN.
      */
-    buildUnknownReport(observedEvidence, _config, jobName, stepName, reason, confidence = 0, secondarySignals = []) {
+    buildUnknownReport(observedEvidence, _config, jobName, stepName, reason, confidence = 0, secondarySignals = [], runtimeMetrics, historyAnalyzed = 0) {
         const inferenceDetails = `Classification is UNKNOWN. ${reason}`;
         return {
             classification: 'UNKNOWN',
@@ -32028,9 +32028,9 @@ class Classifier {
             stepName,
             secondarySignals: secondarySignals.length > 0 ? secondarySignals : undefined,
             metadata: {
-                historyAnalyzed: 0,
-                logBytesProcessed: 0,
-                durationMs: 0,
+                historyAnalyzed,
+                logBytesProcessed: runtimeMetrics?.logBytesProcessed ?? 0,
+                durationMs: runtimeMetrics?.durationMs ?? 0,
             },
         };
     }
@@ -32582,6 +32582,13 @@ const DEFAULT_ERROR_SIGNATURES = [
     '×',
     'yaml:',
     'undefined:',
+    'curl: (7)',
+    'Failed to connect to',
+    "Couldn't connect to server",
+    'Could not connect to server',
+    'connection refused',
+    'connection reset',
+    'network is unreachable',
 ];
 /**
  * Checks if a sanitized log line matches candidate error/failure patterns.
@@ -33307,7 +33314,7 @@ class TestFailureDetector {
 ;// CONCATENATED MODULE: ./src/detectors/network.ts
 
 
-const SOCKET_NET_PATTERN = /\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|connection reset|connection refused|getaddrinfo ENOTFOUND|Could not resolve host|Name or service not known|FetchError|NetworkError|Failed to fetch)\b/i;
+const SOCKET_NET_PATTERN = /\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|connection reset|connection refused|network is unreachable|getaddrinfo ENOTFOUND|Could not resolve host|Name or service not known|FetchError|NetworkError|Failed to fetch|Failed to connect(?: to)?|Couldn't connect to server|Could not connect to server)\b|curl:\s*\(\s*7\s*\)/i;
 const HTTP_NET_STATUS_PATTERN = /\b(?:HTTP|status code|Status)\s*(?:408|429|500|502|503|504)\b|\b(?:502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout|429 Too Many Requests)\b/i;
 const TEST_ASSERTION_PATTERN = /\b(?:expect\(|AssertionError|toEqual|toBe\(|assert\b|expected status|status_code ==)\b/i;
 class NetworkDetector {
@@ -33322,20 +33329,28 @@ class NetworkDetector {
         let primaryRawError = '';
         let hasTransportFailure = false;
         for (const frame of parseResult.frames) {
-            const allLines = [frame.rawErrorLine, ...frame.linesBefore, ...frame.linesAfter].join('\n');
+            const frameLines = [frame.rawErrorLine, ...frame.linesBefore, ...frame.linesAfter];
+            const allLines = frameLines.join('\n');
             const isTestAssertion = TEST_ASSERTION_PATTERN.test(allLines);
-            const socketMatch = SOCKET_NET_PATTERN.exec(allLines);
-            if (socketMatch) {
-                hasTransportFailure = true;
-                evidence.push(createEvidenceItem(`net_socket_${frame.id}`, 'log_signature', `Observed transport network error signature: "${socketMatch[0]}" in "${frame.rawErrorLine.slice(0, 150)}"`, 95, frame.rawErrorLine));
-                if (!primaryRawError)
-                    primaryRawError = frame.rawErrorLine;
+            const seenSocketLines = new Set();
+            for (const line of [frame.rawErrorLine, ...frame.linesAfter, ...frame.linesBefore]) {
+                if (!line || seenSocketLines.has(line))
+                    continue;
+                const match = SOCKET_NET_PATTERN.exec(line);
+                if (match) {
+                    seenSocketLines.add(line);
+                    hasTransportFailure = true;
+                    const idx = evidence.length + 1;
+                    evidence.push(createEvidenceItem(`net_socket_${frame.id}_${idx}`, 'log_signature', `Observed transport network error signature: "${match[0]}" in "${line.slice(0, 150)}"`, 95, line));
+                    if (!primaryRawError)
+                        primaryRawError = line;
+                }
             }
             const httpMatch = HTTP_NET_STATUS_PATTERN.exec(allLines);
             if (httpMatch) {
                 // Filter out test runner assertions comparing HTTP status codes
-                if (!isTestAssertion || socketMatch) {
-                    evidence.push(createEvidenceItem(`net_http_${frame.id}`, 'log_signature', `Observed HTTP network status response: "${httpMatch[0]}" in "${frame.rawErrorLine.slice(0, 150)}"`, socketMatch ? 85 : 60, frame.rawErrorLine));
+                if (!isTestAssertion || hasTransportFailure) {
+                    evidence.push(createEvidenceItem(`net_http_${frame.id}`, 'log_signature', `Observed HTTP network status response: "${httpMatch[0]}" in "${frame.rawErrorLine.slice(0, 150)}"`, hasTransportFailure ? 85 : 60, frame.rawErrorLine));
                     if (!primaryRawError)
                         primaryRawError = frame.rawErrorLine;
                 }
@@ -34215,6 +34230,7 @@ function generateMarkdownReport(report) {
 
 
 async function runActionOrchestrator(deps = {}) {
+    const startedAt = Date.now();
     const inputGetter = deps.inputGetter || ((name) => core.getInput(name));
     const githubContext = deps.githubContext || github.context;
     const summaryWriter = deps.summaryWriter ||
@@ -34243,6 +34259,10 @@ async function runActionOrchestrator(deps = {}) {
         });
         // 5. Parse logs using Phase 2 parseLogStream
         const parseResult = await parseLogStream(analysisContext.logProvider, analysisContext.config);
+        analysisContext.runtimeMetrics = {
+            logBytesProcessed: parseResult.bytesProcessed,
+            durationMs: Math.max(0, Date.now() - startedAt),
+        };
         // 6. Run Phase 3 detectors against evidence and context
         const detectorResults = triageAllFailures({
             context: analysisContext,
