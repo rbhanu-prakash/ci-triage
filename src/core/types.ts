@@ -88,6 +88,11 @@ export interface AnalysisContext {
   };
   /** Configuration settings for analysis thresholds and boundaries */
   config: AnalysisConfig;
+  /** Runtime measurements populated by the action orchestrator after parsing. */
+  runtimeMetrics?: {
+    logBytesProcessed: number;
+    durationMs: number;
+  };
 }
 
 export interface EvidenceContributor {

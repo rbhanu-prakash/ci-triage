@@ -37,3 +37,14 @@ jobs:
 
       - name: Build GitHub Action bundle
         run: npm run build
+
+      - name: Verify committed action bundle is current
+        run: git diff --exit-code -- dist
+
+      - name: Upload built bundle for diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-triage-dist
+          path: dist/
+          if-no-files-found: error

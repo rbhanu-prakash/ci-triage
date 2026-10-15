@@ -16,7 +16,19 @@ jobs:
 
     steps:
       - name: Run CI Triage
+        id: triage
         uses: rbhanu-prakash/ci-triage@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           comment-on-pr: false
+
+      - name: Assert expected classification
+        if: always()
+        env:
+          CLASSIFICATION: ${{ steps.triage.outputs.classification }}
+        run: |
+          if [ "$CLASSIFICATION" != "NETWORK" ]; then
+            echo "Expected NETWORK classification, got: ${CLASSIFICATION:-<empty>}"
+            exit 1
+          fi
+          echo "CI Triage correctly classified the synthetic connection failure as NETWORK."
