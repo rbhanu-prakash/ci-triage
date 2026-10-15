@@ -9,7 +9,7 @@ CI Triage is an evidence-backed, deterministic failure diagnosis tool for GitHub
 ## Features
 
 - **Deterministic Failure Classification**: Accurately categorizes errors into `TEST_FAILURE`, `FLAKY_TEST`, `CODE_REGRESSION`, `DEPENDENCY`, `NETWORK`, `TIMEOUT`, `CONFIGURATION`, `PERMISSION`, `BUILD`, `RESOURCE`, or defaults safely to `UNKNOWN`.
-- **Bounded-Memory Stream Processing**: Streams job logs incrementally through a sliding window parser to guarantee zero memory blowouts even on 100MB+ logs.
+- **Bounded-Memory Stream Processing**: Streams job logs incrementally through a sliding window parser to processes logs incrementally with a 10 MiB per-log processing limit.
 - **Cross-Run Historical Fingerprints**: Tracks normalized SHA-256 error fingerprints across previous runs of the same workflow to reliably detect intermittent and flaky tests.
 - **Automatic Secret Scrubbing**: Redacts tokens, passwords, private keys, authorization headers, and custom secrets before emitting summaries.
 - **Native Step Summaries & Optional PR Comments**: Writes directly to `$GITHUB_STEP_SUMMARY` and optionally posts diagnostic comments to the associated Pull Request.
@@ -50,7 +50,7 @@ jobs:
 
       - name: Triage Failures
         if: failure()
-        uses: ci-triage/ci-triage@v0.1
+        uses: rbhanu-prakash/ci-triage@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           history-depth: 10
@@ -76,7 +76,7 @@ jobs:
 
       - name: Triage Failures & Comment on PR
         if: failure()
-        uses: ci-triage/ci-triage@v0.1
+        uses: rbhanu-prakash/ci-triage@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           comment-on-pr: true
