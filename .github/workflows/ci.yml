@@ -39,7 +39,7 @@ jobs:
         run: npm run build
 
       - name: Verify committed action bundle is current
-        run: git diff --exit-code -- dist
+        run: git diff --exit-code -- dist && git ls-files --others --exclude-standard dist | (! grep .)
 
       - name: Upload built bundle for diagnostics
         if: always()
