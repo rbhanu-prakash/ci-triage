@@ -21,6 +21,7 @@ export interface ActionOrchestrationDeps {
 }
 
 export async function runActionOrchestrator(deps: ActionOrchestrationDeps = {}): Promise<void> {
+  const startedAt = Date.now();
   const inputGetter = deps.inputGetter || ((name: string) => core.getInput(name));
   const githubContext = deps.githubContext || github.context;
   const summaryWriter =
@@ -57,6 +58,10 @@ export async function runActionOrchestrator(deps: ActionOrchestrationDeps = {}):
 
     // 5. Parse logs using Phase 2 parseLogStream
     const parseResult = await parseLogStream(analysisContext.logProvider, analysisContext.config);
+    analysisContext.runtimeMetrics = {
+      logBytesProcessed: parseResult.bytesProcessed,
+      durationMs: Math.max(0, Date.now() - startedAt),
+    };
 
     // 6. Run Phase 3 detectors against evidence and context
     const detectorResults = triageAllFailures({
