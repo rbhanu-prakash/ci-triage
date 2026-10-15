@@ -2,6 +2,10 @@ name: CI Triage E2E Test
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/ci-triage-e2e.yml
 
 permissions:
   contents: read
@@ -13,5 +17,5 @@ jobs:
     steps:
       - name: Generate deterministic connection failure
         run: |
-          echo "CI Triage E2E test"
+          echo "CI Triage E2E test: a connection failure should be classified as NETWORK."
           curl --fail --silent --show-error http://127.0.0.1:9/test
