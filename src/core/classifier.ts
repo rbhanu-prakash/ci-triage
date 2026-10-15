@@ -116,8 +116,8 @@ export class Classifier {
       secondarySignals: secondary.length > 0 ? secondary : undefined,
       metadata: {
         historyAnalyzed: context?.historicalRuns?.length || 0,
-        logBytesProcessed: 0,
-        durationMs: 0,
+        logBytesProcessed: context?.runtimeMetrics?.logBytesProcessed ?? 0,
+        durationMs: context?.runtimeMetrics?.durationMs ?? 0,
       },
     };
   }
