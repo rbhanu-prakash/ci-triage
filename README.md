@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Triage failed workflow
-        uses: rbhanu-prakash/ci-triage@main
+        uses: rbhanu-prakash/ci-triage@v0.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           history-depth: 10
@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Triage failed workflow and comment on PR
-        uses: rbhanu-prakash/ci-triage@main
+        uses: rbhanu-prakash/ci-triage@v0.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           history-depth: 10
