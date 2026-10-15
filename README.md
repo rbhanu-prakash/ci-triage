@@ -30,6 +30,7 @@ on:
 permissions:
   contents: read
   actions: read
+  pull-requests: read # Enables changed-file evidence for PR runs
 
 jobs:
   triage:
@@ -48,27 +49,35 @@ jobs:
 
 ## Optional: Commenting on Pull Requests
 
-To post Markdown triage reports directly as PR comments, add `pull-requests: write` to the permissions and set `comment-on-pr: true` in the same `workflow_run` action step:
+To post Markdown triage reports as PR comments, use a workflow similar to the following and grant `pull-requests: write`. This is a complete alternative to the minimal example above; keep the workflow name filter matched to your test workflow.
 
 ```yaml
+name: CI Failure Triage
+
+on:
+  workflow_run:
+    workflows: ["Test Suite"] # Must exactly match the upstream workflow's name
+    types: [completed]
+
 permissions:
   contents: read
   actions: read
-  pull-requests: write # Required for PR commenting
+  pull-requests: write
 
 jobs:
-  test:
+  triage:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
     runs-on: ubuntu-latest
     steps:
-      # ... [previous steps] ...
-
-      - name: Triage Failures & Comment on PR
-        if: failure()
+      - name: Triage failed workflow and comment on PR
         uses: rbhanu-prakash/ci-triage@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          history-depth: 10
           comment-on-pr: true
 ```
+
+The `workflow_run` trigger can receive elevated permissions. Keep the privileged workflow limited to trusted steps: do not check out or execute code from the triggering workflow's branch or untrusted artifacts.
 
 ---
 
