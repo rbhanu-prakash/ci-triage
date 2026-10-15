@@ -6,6 +6,10 @@ on:
     branches: [main]
     paths:
       - .github/workflows/ci-triage-e2e.yml
+      - .github/workflows/ci-triage.yml
+      - package.json
+      - scripts/clean-dist.mjs
+      - dist/index.js
 
 permissions:
   contents: read
