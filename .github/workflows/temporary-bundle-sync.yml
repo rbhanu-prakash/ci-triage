@@ -1,0 +1,36 @@
+name: Temporary bundle sync
+
+on:
+  push:
+    branches:
+      - fix/runtime-bundle-e2e
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/fix/runtime-bundle-e2e'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/runtime-bundle-e2e
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Build action
+        run: npm run build
+      - name: Commit generated runtime
+        run: |
+          git add -A dist/
+          if git diff --cached --quiet; then
+            echo "No generated runtime changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "build: refresh bundled action runtime"
+          git push origin HEAD:fix/runtime-bundle-e2e
