@@ -9,7 +9,7 @@ CI Triage is an evidence-backed, deterministic failure diagnosis tool for GitHub
 ## Features
 
 - **Deterministic Failure Classification**: Accurately categorizes errors into `TEST_FAILURE`, `FLAKY_TEST`, `CODE_REGRESSION`, `DEPENDENCY`, `NETWORK`, `TIMEOUT`, `CONFIGURATION`, `PERMISSION`, `BUILD`, `RESOURCE`, or defaults safely to `UNKNOWN`.
-- **Bounded-Memory Stream Processing**: Streams job logs incrementally through a sliding window parser to processes logs incrementally with a 10 MiB per-log processing limit.
+- **Bounded-Memory Stream Processing**: Processes job logs incrementally through a sliding-window parser, with a 10 MiB per-log processing limit.
 - **Cross-Run Historical Fingerprints**: Tracks normalized SHA-256 error fingerprints across previous runs of the same workflow to reliably detect intermittent and flaky tests.
 - **Automatic Secret Scrubbing**: Redacts tokens, passwords, private keys, authorization headers, and custom secrets before emitting summaries.
 - **Native Step Summaries & Optional PR Comments**: Writes directly to `$GITHUB_STEP_SUMMARY` and optionally posts diagnostic comments to the associated Pull Request.
@@ -18,49 +18,37 @@ CI Triage is an evidence-backed, deterministic failure diagnosis tool for GitHub
 
 ## Minimal Workflow Example
 
-Add CI Triage as a workflow step triggered when prior steps fail:
+Run CI Triage in a separate workflow after the test workflow completes. This lets the action retrieve the completed run's job logs:
 
 ```yaml
-name: Test Suite
+name: CI Failure Triage
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: ["Test Suite"] # Must match the test workflow's name exactly
+    types: [completed]
 
 permissions:
   contents: read
-  actions: read # Required to download workflow job logs
+  actions: read
 
 jobs:
-  test:
+  triage:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run test suite
-        run: npm test
-
-      - name: Triage Failures
-        if: failure()
+      - name: Triage failed workflow
         uses: rbhanu-prakash/ci-triage@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           history-depth: 10
+          comment-on-pr: false
 ```
 
 ---
 
 ## Optional: Commenting on Pull Requests
 
-To post Markdown triage reports directly as PR comments, enable `comment-on-pr` and grant the `pull-requests: write` permission:
+To post Markdown triage reports directly as PR comments, add `pull-requests: write` to the permissions and set `comment-on-pr: true` in the same `workflow_run` action step:
 
 ```yaml
 permissions:
