@@ -63,6 +63,10 @@ export class Classifier {
         jobName,
         stepName,
         'No deterministic error signatures were detected in the failure log.',
+        0,
+        [],
+        context?.runtimeMetrics,
+        context?.historicalRuns?.length || 0,
       );
     }
 
@@ -93,6 +97,8 @@ export class Classifier {
         reason,
         rawConfidence,
         secondary,
+        context?.runtimeMetrics,
+        context?.historicalRuns?.length || 0,
       );
     }
 
@@ -327,6 +333,8 @@ export class Classifier {
     reason: string,
     confidence = 0,
     secondarySignals: SecondarySignal[] = [],
+    runtimeMetrics?: AnalysisContext['runtimeMetrics'],
+    historyAnalyzed = 0,
   ): TriageReport {
     const inferenceDetails = `Classification is UNKNOWN. ${reason}`;
 
@@ -340,9 +348,9 @@ export class Classifier {
       stepName,
       secondarySignals: secondarySignals.length > 0 ? secondarySignals : undefined,
       metadata: {
-        historyAnalyzed: 0,
-        logBytesProcessed: 0,
-        durationMs: 0,
+        historyAnalyzed,
+        logBytesProcessed: runtimeMetrics?.logBytesProcessed ?? 0,
+        durationMs: runtimeMetrics?.durationMs ?? 0,
       },
     };
   }
