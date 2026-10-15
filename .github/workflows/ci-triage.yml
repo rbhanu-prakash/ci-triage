@@ -17,7 +17,7 @@ jobs:
     steps:
       - name: Run CI Triage
         id: triage
-        uses: rbhanu-prakash/ci-triage@main
+        uses: rbhanu-prakash/ci-triage@v0.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           comment-on-pr: false
