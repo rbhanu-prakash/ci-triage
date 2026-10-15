@@ -2,9 +2,7 @@
 
 All notable changes to CI Triage are documented here.
 
-## 0.1.0 — Initial release candidate (not yet published)
-
-This entry records the current release scope. It does not mean a GitHub Release or version tag has been published yet.
+## 0.1.0 — Initial release
 
 - Deterministic GitHub Actions failure classification with confidence scoring and an `UNKNOWN` fallback.
 - Bounded log processing, secret scrubbing, and cross-run failure fingerprints.
