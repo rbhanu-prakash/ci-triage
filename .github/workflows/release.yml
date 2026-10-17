@@ -16,8 +16,8 @@ jobs:
     steps:
       - name: Check out the commit that passed CI
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-          persist-credentials: false
         with:
+          persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 1
 
